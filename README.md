@@ -48,8 +48,11 @@ Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, 
 
 ## Prerequisites
 
-- **Python 3.12+** — [download](https://www.python.org/downloads/) or `brew install python@3.12`
-- **One AI CLI installed and logged in** — see [Supported CLIs](#supported-CLIs)
+- **Python 3.12+** — [download](https://www.python.org/downloads/)
+  - macOS: `brew install python@3.12`
+  - Ubuntu: `sudo apt install python3.12`
+  - Windows: download installer, check **"Add Python to PATH"**
+- **One AI CLI installed and logged in** — see [Supported CLIs](#supported-clis)
 - **Telegram account** — to create a bot via [@BotFather](https://t.me/BotFather)
 
 ## Quick Start
@@ -57,7 +60,20 @@ Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, 
 ```bash
 git clone https://github.com/quangtam/chati.git
 cd chati
+```
+
+**macOS / Linux:**
+
+```bash
 bash setup.sh
+./chati start
+```
+
+**Windows:**
+
+```cmd
+setup.bat
+chati start
 ```
 
 The setup wizard will:
@@ -69,14 +85,14 @@ The setup wizard will:
 5. Set your project directory
 6. Generate `.env`
 
-After setup, login your CLI and start:
+After setup, login your CLI once and start:
 
 ```bash
 # Login your CLI (one time only)
 kiro-cli login    # or: claude login / gemini auth / codex login
 
 # Start Chati
-./chati start
+./chati start     # Windows: chati start
 ```
 
 ## Manual Setup
@@ -126,11 +142,11 @@ pip install -r requirements.txt
 ### 5. Run
 
 ```bash
-./chati start      # start in background
-./chati stop       # stop
-./chati restart    # restart
-./chati status     # check if running
-./chati log        # tail -f logs
+./chati start      # start in background     (Windows: chati start)
+./chati stop       # stop                    (Windows: chati stop)
+./chati restart    # restart                 (Windows: chati restart)
+./chati status     # check if running        (Windows: chati status)
+./chati log        # tail -f logs            (Windows: chati log)
 ```
 
 ## Usage
