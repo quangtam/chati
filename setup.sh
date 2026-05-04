@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+#
+# Chati — interactive setup wizard
+# Run: bash setup.sh
+#
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="$DIR/.env"
+
+# ── Colors ───────────────────────────────────────────────────────
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { echo -e "${CYAN}ℹ ${NC}$1"; }
+ok()    { echo -e "${GREEN}✅ ${NC}$1"; }
+warn()  { echo -e "${YELLOW}⚠️  ${NC}$1"; }
+err()   { echo -e "${RED}❌ ${NC}$1"; }
+ask()   { echo -en "${BOLD}$1${NC}"; }
+
+# ── Banner ───────────────────────────────────────────────────────
+
+echo ""
+echo -e "${BOLD}"
+echo '   ██████╗██╗  ██╗ █████╗ ████████╗██╗'
+echo '  ██╔════╝██║  ██║██╔══██╗╚══██╔══╝██║'
+echo '  ██║     ███████║███████║   ██║   ██║'
+echo '  ██║     ██╔══██║██╔══██║   ██║   ██║'
+echo '  ╚██████╗██║  ██║██║  ██║   ██║   ██║'
+echo '   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝  ╚═╝'
+echo -e "${NC}"
+echo -e "        ${CYAN}code from your pocket 💬→💻${NC}"
+echo ""
+
+# ── Step 1: Check Python ────────────────────────────────────────
+
+info "Checking prerequisites..."
+echo ""
+
+PYTHON=""
+for cmd in python3.14 python3.13 python3.12 python3; do
+    if command -v "$cmd" &>/dev/null; then
+        ver=$("$cmd" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+')
+        major=$(echo "$ver" | cut -d. -f1)
+        minor=$(echo "$ver" | cut -d. -f2)
+        if [[ "$major" -ge 3 && "$minor" -ge 12 ]]; then
+            PYTHON="$cmd"
+            ok "Python: $("$cmd" --version)"
+            break
+        fi
+    fi
+done
+
+if [[ -z "$PYTHON" ]]; then
+    err "Python 3.12+ is required but not found."
+    echo ""
+    echo "  Install options:"
+    echo "    macOS:   brew install python@3.12"
+    echo "    Ubuntu:  sudo apt install python3.12"
+    echo "    Other:   https://www.python.org/downloads/"
+    echo ""
+    exit 1
+fi
+
+# ── Step 2: Create venv + install deps ───────────────────────────
+
+if [[ ! -d "$DIR/.venv" ]]; then
+    info "Creating virtual environment..."
+    "$PYTHON" -m venv "$DIR/.venv"
+    ok "Virtual environment created"
+else
+    ok "Virtual environment exists"
+fi
+
+info "Installing dependencies..."
+"$DIR/.venv/bin/pip" install -q -r "$DIR/requirements.txt"
+ok "Dependencies installed"
+echo ""
+
+# ── Step 3: Choose CLI provider ─────────────────────────────────
+
+echo -e "${BOLD}Which AI CLI do you want to use?${NC}"
+echo ""
+echo "  1) Kiro CLI        (kiro-cli)"
+echo "  2) Claude Code     (claude)"
+echo "  3) Gemini CLI      (gemini)"
+echo "  4) OpenAI Codex    (codex)"
+echo ""
+ask "Choose [1-4]: "
+read -r choice
+
+case "$choice" in
+    1) CLI_PROVIDER="kiro";   CLI_BIN="kiro-cli" ;;
+    2) CLI_PROVIDER="claude"; CLI_BIN="claude"    ;;
+    3) CLI_PROVIDER="gemini"; CLI_BIN="gemini"    ;;
+    4) CLI_PROVIDER="codex";  CLI_BIN="codex"     ;;
+    *)
+        err "Invalid choice"
+        exit 1
+        ;;
+esac
+
+# Check if CLI is installed
+if command -v "$CLI_BIN" &>/dev/null; then
+    ok "$CLI_BIN found: $(command -v "$CLI_BIN")"
+else
+    warn "$CLI_BIN not found in PATH."
+    echo ""
+    case "$CLI_PROVIDER" in
+        kiro)   echo "  Install: brew install --cask kiro-cli" ;;
+        claude) echo "  Install: npm install -g @anthropic-ai/claude-code" ;;
+        gemini) echo "  Install: npm install -g @anthropic-ai/gemini-cli" ;;
+        codex)  echo "  Install: npm install -g @openai/codex" ;;
+    esac
+    echo "  Then re-run: bash setup.sh"
+    echo ""
+    ask "Continue anyway? [y/N]: "
+    read -r cont
+    [[ "$cont" =~ ^[Yy] ]] || exit 1
+fi
+echo ""
+
+# ── Step 4: Telegram bot token ───────────────────────────────────
+
+echo -e "${BOLD}Telegram Bot Setup${NC}"
+echo ""
+echo "  1. Open Telegram → find @BotFather"
+echo "  2. Send /newbot → follow the prompts"
+echo "  3. Copy the bot token"
+echo ""
+ask "Paste your Telegram bot token: "
+read -r BOT_TOKEN
+
+if [[ -z "$BOT_TOKEN" ]]; then
+    err "Bot token is required"
+    exit 1
+fi
+echo ""
+
+# ── Step 5: Telegram user ID ────────────────────────────────────
+
+echo "  To get your Telegram user ID:"
+echo "  → Open Telegram → find @userinfobot → send /start"
+echo ""
+ask "Your Telegram user ID: "
+read -r USER_IDS
+
+if [[ -z "$USER_IDS" ]]; then
+    err "User ID is required"
+    exit 1
+fi
+echo ""
+
+# ── Step 6: Project directory ────────────────────────────────────
+
+ask "Project directory for CLI to work in [$(pwd)]: "
+read -r PROJECT_DIR
+PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
+
+if [[ ! -d "$PROJECT_DIR" ]]; then
+    err "Directory does not exist: $PROJECT_DIR"
+    exit 1
+fi
+ok "Project: $PROJECT_DIR"
+echo ""
+
+# ── Step 7: Write .env ──────────────────────────────────────────
+
+if [[ -f "$ENV_FILE" ]]; then
+    warn ".env already exists"
+    ask "Overwrite? [y/N]: "
+    read -r overwrite
+    if [[ ! "$overwrite" =~ ^[Yy] ]]; then
+        info "Keeping existing .env"
+        echo ""
+    fi
+fi
+
+if [[ ! -f "$ENV_FILE" || "$overwrite" =~ ^[Yy] ]]; then
+    cat > "$ENV_FILE" <<EOF
+TELEGRAM_BOT_TOKEN=$BOT_TOKEN
+ALLOWED_USER_IDS=$USER_IDS
+CLI_PROVIDER=$CLI_PROVIDER
+PROJECT_DIR=$PROJECT_DIR
+CLI_TIMEOUT=300
+CLI_TRUST_ALL_TOOLS=true
+LOG_LEVEL=INFO
+EOF
+    ok ".env created"
+fi
+
+# ── Step 8: Make chati executable ────────────────────────────────
+
+chmod +x "$DIR/chati"
+
+# ── Done ─────────────────────────────────────────────────────────
+
+echo ""
+echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}${BOLD}  Chati is ready!${NC}"
+echo -e "${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "  Make sure your CLI is logged in:"
+case "$CLI_PROVIDER" in
+    kiro)   echo "    kiro-cli login" ;;
+    claude) echo "    claude login" ;;
+    gemini) echo "    gemini auth" ;;
+    codex)  echo "    codex login" ;;
+esac
+echo ""
+echo "  Then start Chati:"
+echo "    ./chati start"
+echo ""
+echo "  Other commands:"
+echo "    ./chati stop       # stop"
+echo "    ./chati restart    # restart"
+echo "    ./chati status     # check status"
+echo "    ./chati log        # view logs"
+echo ""

@@ -46,11 +46,46 @@ Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, 
 
 > **Note:** All CLIs authenticate via browser login on the machine where Chati runs. Install the CLI, login once, and Chati uses that local session. No API keys needed.
 
-## Setup
+## Prerequisites
+
+- **Python 3.12+** — [download](https://www.python.org/downloads/) or `brew install python@3.12`
+- **One AI CLI installed and logged in** — see [Supported CLIs](#supported-CLIs)
+- **Telegram account** — to create a bot via [@BotFather](https://t.me/BotFather)
+
+## Quick Start
+
+```bash
+git clone https://github.com/quangtam/chati.git
+cd chati
+bash setup.sh
+```
+
+The setup wizard will:
+
+1. Check Python version
+2. Create virtual environment and install dependencies
+3. Ask which AI CLI you want to use
+4. Configure Telegram bot token and user ID
+5. Set your project directory
+6. Generate `.env`
+
+After setup, login your CLI and start:
+
+```bash
+# Login your CLI (one time only)
+kiro-cli login    # or: claude login / gemini auth / codex login
+
+# Start Chati
+./chati start
+```
+
+## Manual Setup
+
+If you prefer to configure manually:
 
 ### 1. Create a chat bot
 
-Currently supports Telegram. Create a bot via `@BotFather`:
+Currently supports Telegram. Create a bot via [@BotFather](https://t.me/BotFather):
 1. Open Telegram, find `@BotFather`
 2. Send `/newbot`, set name and username
 3. Copy the **BOT_TOKEN**
