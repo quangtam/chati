@@ -10,6 +10,7 @@ Features:
 - BMAD skill routing
 """
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -420,11 +421,23 @@ async def _execute_and_reply_inner(
         parse_mode=ParseMode.HTML,
     )
 
+    # Background typing keepalive — runs independently of stream loop
+    typing_active = True
+
+    async def _typing_keepalive():
+        while typing_active:
+            try:
+                await update.message.reply_chat_action(ChatAction.TYPING)
+            except Exception:
+                pass
+            await asyncio.sleep(_TYPING_KEEPALIVE_INTERVAL)
+
+    typing_task = asyncio.create_task(_typing_keepalive())
+
     # Collect all raw output + stream preview to Telegram
     raw_lines: list[str] = []
     preview_buffer = ""
     last_edit_time = 0.0
-    last_typing_time = 0.0
     response_started = False
     response_marker = runner.provider.response_marker
 
@@ -433,59 +446,60 @@ async def _execute_and_reply_inner(
 
     import time
 
-    async for line in runner.execute_stream(prompt, thread_id=thread_id, model=model, resume=resume):
-        raw_lines.append(line)
-        now = time.monotonic()
+    try:
+        async for line in runner.execute_stream(prompt, thread_id=thread_id, model=model, resume=resume):
+            raw_lines.append(line)
+            now = time.monotonic()
 
-        # Keep typing indicator alive
-        if now - last_typing_time >= _TYPING_KEEPALIVE_INTERVAL:
-            try:
-                await update.message.reply_chat_action(ChatAction.TYPING)
-                last_typing_time = now
-            except Exception:
-                pass
+            # Strip ANSI for preview
+            clean_line = strip_ansi(line).rstrip()
+            if not clean_line:
+                continue
 
-        # Strip ANSI for preview
-        clean_line = strip_ansi(line).rstrip()
-        if not clean_line:
-            continue
+            # Detect response start
+            if response_marker and not response_started and clean_line.startswith(response_marker):
+                response_started = True
+                clean_line = clean_line[len(response_marker):]
 
-        # Detect response start
-        if response_marker and not response_started and clean_line.startswith(response_marker):
-            response_started = True
-            clean_line = clean_line[len(response_marker):]
+            if response_started:
+                preview_buffer += clean_line + "\n"
 
-        if response_started:
-            preview_buffer += clean_line + "\n"
+                if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
+                    preview = preview_buffer[-_STREAM_PREVIEW_MAX:]
+                    if len(preview_buffer) > _STREAM_PREVIEW_MAX:
+                        nl = preview.find("\n")
+                        if nl > 0:
+                            preview = preview[nl + 1:]
+                        preview = "...\n" + preview
 
-            if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
-                preview = preview_buffer[-_STREAM_PREVIEW_MAX:]
-                if len(preview_buffer) > _STREAM_PREVIEW_MAX:
-                    nl = preview.find("\n")
-                    if nl > 0:
-                        preview = preview[nl + 1:]
-                    preview = "...\n" + preview
-
-                try:
-                    await stream_msg.edit_text(
-                        f"✍️ <i>Streaming...</i>\n\n"
-                        f"<pre>{_escape_html(preview.rstrip())}</pre>",
-                        parse_mode=ParseMode.HTML,
-                    )
-                    last_edit_time = now
-                except Exception:
-                    pass
-        else:
-            if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
-                status_line = clean_line[:100]
-                try:
-                    await stream_msg.edit_text(
-                        f"⚙️ <i>{_escape_html(status_line)}</i>",
-                        parse_mode=ParseMode.HTML,
-                    )
-                    last_edit_time = now
-                except Exception:
-                    pass
+                    try:
+                        await stream_msg.edit_text(
+                            f"✍️ <i>Streaming...</i>\n\n"
+                            f"<pre>{_escape_html(preview.rstrip())}</pre>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        last_edit_time = now
+                    except Exception:
+                        pass
+            else:
+                if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
+                    status_line = clean_line[:100]
+                    try:
+                        await stream_msg.edit_text(
+                            f"⚙️ <i>{_escape_html(status_line)}</i>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                        last_edit_time = now
+                    except Exception:
+                        pass
+    finally:
+        # Stop typing keepalive
+        typing_active = False
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
 
     # Track this thread for future resume
     _track_thread(thread_id)
