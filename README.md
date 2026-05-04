@@ -1,5 +1,7 @@
 # Chati
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Chat with any AI coding CLI from your phone. No laptop needed.
 
 Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, Gemini, Codex) — send a message, get code back.
