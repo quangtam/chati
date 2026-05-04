@@ -1,5 +1,15 @@
 # Chati
 
+```
+   ██████╗██╗  ██╗ █████╗ ████████╗██╗
+  ██╔════╝██║  ██║██╔══██╗╚══██╔══╝██║
+  ██║     ███████║███████║   ██║   ██║
+  ██║     ██╔══██║██╔══██║   ██║   ██║
+  ╚██████╗██║  ██║██║  ██║   ██║   ██║
+   ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝  ╚═╝
+        code from your pocket 💬→💻
+```
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Chat with any AI coding CLI from your phone. No laptop needed.
