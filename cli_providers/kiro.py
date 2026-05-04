@@ -53,3 +53,16 @@ class KiroProvider(CliProvider):
 
     def status_check_args(self):
         return [self.config.cli_path, "whoami"]
+
+    def build_interactive_args(self, *, model=None):
+        """Start kiro-cli in interactive mode (persistent session)."""
+        args = [self.config.cli_path, "chat"]
+        if self.config.trust_all_tools:
+            args.append("--trust-all-tools")
+        if model:
+            args.extend(["--model", model])
+        args.append("--wrap")
+        args.append("never")
+        if self.config.extra_args:
+            args.extend(self.config.extra_args)
+        return args

@@ -93,6 +93,14 @@ class CliProvider(ABC):
         """
         return [self.config.cli_path, "--version"]
 
+    def build_interactive_args(self, *, model: str | None = None) -> list[str] | None:
+        """Return CLI args to start an interactive session.
+
+        Returns None if this provider doesn't support interactive mode.
+        Override in subclass to enable persistent sessions.
+        """
+        return None
+
     # ── Helpers available to subclasses ───────────────────────────
 
     def _base_env(self, base_env: dict[str, str]) -> dict[str, str]:
