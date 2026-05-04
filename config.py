@@ -84,7 +84,7 @@ class Config:
             cli_api_key=api_key,
             cli_extra_args=extra_args,
             project_dir=project_dir,
-            cli_timeout=int(os.getenv("CLI_TIMEOUT", os.getenv("KIRO_TIMEOUT", "300"))),
+            cli_timeout=int(os.getenv("CLI_TIMEOUT", os.getenv("KIRO_TIMEOUT", "600"))),
             trust_all_tools=os.getenv(
                 "CLI_TRUST_ALL_TOOLS",
                 os.getenv("KIRO_TRUST_ALL_TOOLS", "true"),

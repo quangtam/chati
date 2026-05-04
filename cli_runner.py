@@ -17,8 +17,8 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-# If no new output for this many seconds, consider the process stuck
-IDLE_TIMEOUT = 90
+# Warn user if no output for this many seconds (process may be doing background work)
+IDLE_WARN_INTERVAL = 30
 
 
 @dataclass
@@ -109,7 +109,15 @@ class CliRunner:
         model: str | None,
         resume: bool,
     ) -> AsyncGenerator[str, None]:
-        """Inner streaming implementation with watchdog."""
+        """Inner streaming implementation with watchdog.
+
+        Watchdog strategy:
+        - Global timeout (CLI_TIMEOUT): hard kill — non-negotiable
+        - Idle warning (IDLE_WARN_INTERVAL): notify user, but DON'T kill
+          because CLIs like Kiro run subagents that produce no stdout
+          while doing real work (reading files, searching, etc.)
+        - Only kill on global timeout or if process actually exits
+        """
         args = self._provider.build_args(prompt, model=model, resume=resume)
         logger.info("Streaming [thread=%s]: %s", thread_id, " ".join(args))
 
@@ -127,29 +135,27 @@ class CliRunner:
 
             deadline = time.monotonic() + self._config.cli_timeout
             last_output_time = time.monotonic()
-            idle_warnings = 0
+            last_warn_time = 0.0
 
             while True:
                 now = time.monotonic()
 
+                # Global timeout — hard kill
                 if now >= deadline:
                     logger.warning("Stream global timeout [thread=%s]", thread_id)
                     await self._kill_process(process, thread_id)
                     yield "\n⏱ Global timeout reached. Process killed.\n"
                     return
 
+                # Idle warning — inform user but keep waiting
                 idle_seconds = now - last_output_time
-                if idle_seconds >= IDLE_TIMEOUT:
-                    logger.warning("Stream idle %ds [thread=%s]", int(idle_seconds), thread_id)
-                    await self._kill_process(process, thread_id)
-                    yield f"\n⏱ No output for {int(idle_seconds)}s — process stuck. Killed.\n"
-                    return
+                if idle_seconds >= IDLE_WARN_INTERVAL and now - last_warn_time >= IDLE_WARN_INTERVAL:
+                    remaining = int(deadline - now)
+                    yield f"\n⏳ Still working... no output for {int(idle_seconds)}s (timeout in {remaining}s)\n"
+                    last_warn_time = now
 
-                if idle_seconds >= IDLE_TIMEOUT / 2 and idle_warnings == 0:
-                    idle_warnings = 1
-                    yield f"\n⏳ Waiting for output ({int(idle_seconds)}s)...\n"
-
-                read_timeout = min(10, deadline - now, IDLE_TIMEOUT - idle_seconds)
+                # Read next line with short timeout for responsive checks
+                read_timeout = min(5, deadline - now)
                 try:
                     line_bytes = await asyncio.wait_for(
                         process.stdout.readline(),
@@ -157,14 +163,14 @@ class CliRunner:
                     )
                 except asyncio.TimeoutError:
                     if process.returncode is not None:
-                        break
-                    continue
+                        break  # Process exited while we were waiting
+                    continue  # Still running — loop back
 
                 if not line_bytes:
-                    break
+                    break  # EOF
 
                 last_output_time = time.monotonic()
-                idle_warnings = 0
+                last_warn_time = 0.0
                 yield line_bytes.decode("utf-8", errors="replace")
 
             await process.wait()
