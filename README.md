@@ -14,6 +14,16 @@
 
 Chat with any AI coding CLI from your phone. No laptop needed.
 
+<p align="center">
+  <img src="assets/screenshot.jpg" alt="Chati screenshot" width="360" />
+</p>
+
+<p align="center">
+  <video src="https://github.com/quangtam/chati/raw/main/assets/demo.mp4" width="360" controls>
+    Video demo
+  </video>
+</p>
+
 Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, Gemini, Codex) — send a message, get code back.
 
 ## Features
