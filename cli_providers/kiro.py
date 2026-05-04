@@ -3,7 +3,7 @@
 Headless: kiro-cli chat --no-interactive --trust-all-tools "prompt"
 Models:   kiro-cli chat --list-models --format json
 Resume:   --resume
-Auth:     KIRO_API_KEY env var
+Auth:     Local login session (kiro-cli login), or KIRO_API_KEY env var
 """
 
 import json
@@ -32,7 +32,8 @@ class KiroProvider(CliProvider):
 
     def build_env(self, base_env):
         env = self._base_env(base_env)
-        env["KIRO_API_KEY"] = self.config.api_key
+        if self.config.api_key:
+            env["KIRO_API_KEY"] = self.config.api_key
         env["KIRO_LOG_NO_COLOR"] = "1"
         env["CI"] = "1"
         return env

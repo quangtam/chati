@@ -80,11 +80,11 @@ requirements.txt        # python-telegram-bot==21.10, python-dotenv==1.1.0
 | ALLOWED_USER_IDS | Yes | Comma-separated Telegram user IDs |
 | CLI_PROVIDER | No | kiro (default), claude, gemini, codex |
 | CLI_PATH | No | Override CLI binary path |
-| CLI_API_KEY | No | Generic API key (only if CLI requires it) |
+| CLI_API_KEY | No | API key (only for headless/SSH machines) |
 | CLI_TIMEOUT | No | Default: 300s |
 | CLI_TRUST_ALL_TOOLS | No | Default: true |
 | CLI_EXTRA_ARGS | No | Space-separated extra CLI flags |
-| KIRO_API_KEY | No | Kiro auth (required for Kiro provider) |
+| KIRO_API_KEY | No | Kiro auth (optional — prefers local login) |
 | ANTHROPIC_API_KEY | No | Claude auth (optional — prefers local login) |
 | GEMINI_API_KEY | No | Gemini auth (optional — prefers local login) |
 | OPENAI_API_KEY | No | Codex auth (optional — prefers local login) |

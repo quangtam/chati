@@ -49,7 +49,7 @@ class Config:
         # CLI Provider — default to kiro for backward compatibility
         provider = os.getenv("CLI_PROVIDER", "kiro").lower().strip()
 
-        # API key — check provider-specific first, then generic
+        # API key — optional, most CLIs use local login session
         api_key = (
             os.getenv("CLI_API_KEY")
             or os.getenv("KIRO_API_KEY")

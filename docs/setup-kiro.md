@@ -20,23 +20,36 @@ Verify:
 kiro-cli --version
 ```
 
-## Step 2: Get your API key
+## Step 2: Login on your machine
 
-1. Go to [Kiro subscription settings](https://kiro.dev)
-2. Find your **API Key** in account settings
-3. Copy it
+```bash
+kiro-cli login
+```
 
-## Step 3: Configure Chati
+This opens a browser window. Sign in with your Kiro account. The session is saved locally — you only need to do this once.
+
+> **Headless/SSH?** Set `KIRO_API_KEY` in `.env` instead. Get the key from your Kiro subscription settings.
+
+## Step 3: Verify Kiro works
+
+```bash
+kiro-cli chat --no-interactive "say hello"
+```
+
+You should see a response. If this works, Chati will work too.
+
+## Step 4: Configure Chati
 
 Edit `.env`:
 
 ```env
 CLI_PROVIDER=kiro
-KIRO_API_KEY=your-kiro-api-key-here
 PROJECT_DIR=/path/to/your/project
 ```
 
-## Step 4: Verify
+That's it. No API key needed — Chati uses your local login session.
+
+## Step 5: Start and verify
 
 ```bash
 ./chati start
@@ -53,7 +66,7 @@ plan: Pro
 
 ## Notes
 
-- Kiro is the only provider that **requires an API key** in `.env`
+- Auth via local login — no API key in `.env` by default
 - Supports `--resume` for conversation continuity across messages
 - Supports `/model` to switch between available models
 - Supports BMAD skills via `/bmad-*` commands
