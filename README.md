@@ -145,3 +145,7 @@ Then set `CLI_PROVIDER=mycli` in `.env`. No other changes needed.
 - Telegram message limit: 4096 chars (auto-split for longer output)
 - Single project directory per bot instance
 - Only one bot instance can poll the same token at a time
+
+## License
+
+[MIT](LICENSE) — free to use, modify, and distribute.
