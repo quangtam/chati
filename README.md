@@ -37,12 +37,14 @@ Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, 
 
 ## Supported CLIs
 
-| Provider | Binary | Headless flag | Auth env var |
-| -------- | ------ | ------------- | ------------ |
-| Kiro | `kiro-cli` | `--no-interactive` | `KIRO_API_KEY` |
-| Claude Code | `claude` | `-p` | `ANTHROPIC_API_KEY` |
-| Gemini | `gemini` | `-p` | `GEMINI_API_KEY` |
-| Codex | `codex` | `exec` | `OPENAI_API_KEY` |
+| Provider | Binary | Headless flag | Authentication |
+| -------- | ------ | ------------- | -------------- |
+| Kiro | `kiro-cli` | `--no-interactive` | `KIRO_API_KEY` (from Kiro subscription settings) |
+| Claude Code | `claude` | `-p` | Login on local machine: `claude login` |
+| Gemini | `gemini` | `-p` | Login on local machine: `gemini auth` |
+| Codex | `codex` | `exec` | Login on local machine: `codex login` |
+
+> **Note:** Most CLIs authenticate via browser login on the machine where Chati runs — not via API keys. You install the CLI, login once, and Chati uses that local session. Only Kiro requires an explicit API key in `.env`.
 
 ## Setup
 
@@ -72,10 +74,19 @@ ALLOWED_USER_IDS=123456789
 
 # Pick your CLI provider: kiro, claude, gemini, codex
 CLI_PROVIDER=kiro
-KIRO_API_KEY=your-api-key
+
+# Only needed for Kiro. Other CLIs use local login session.
+KIRO_API_KEY=your-kiro-api-key
 
 PROJECT_DIR=/path/to/your/project
 ```
+
+**Auth per CLI:**
+
+- **Kiro** — set `KIRO_API_KEY` in `.env` (get from Kiro subscription settings)
+- **Claude Code** — run `claude login` on the machine once, done
+- **Gemini** — run `gemini auth` on the machine once, done
+- **Codex** — run `codex login` on the machine once, done
 
 ### 4. Install dependencies
 
