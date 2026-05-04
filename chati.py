@@ -301,8 +301,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 @authorized
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /cancel — kill running CLI process."""
-    cancelled = await runner.cancel()
+    """Handle /cancel — kill running CLI process for this thread."""
+    thread_id = _get_thread_id(update)
+    cancelled = await runner.cancel(thread_id)
     if cancelled:
         await update.message.reply_text("✅ Cancelled running CLI process.")
     else:
@@ -376,12 +377,33 @@ async def _execute_and_reply(
     """Execute a prompt via CLI with streaming output.
 
     Features:
+    - Per-thread parallel execution (different threads run concurrently)
+    - Same-thread messages queue sequentially (shared session)
     - Progressive message edits (ChatGPT-like streaming)
     - Typing indicator keepalive
     - Idle watchdog (kills stuck processes)
     - Sends partial output if process dies mid-stream
     """
     thread_id = _get_thread_id(update)
+
+    # Notify if this thread is already busy (will queue behind the lock)
+    if runner.is_busy(thread_id):
+        await update.message.reply_text(
+            "⏳ This thread has a running request — your message is queued.\n"
+            "Use /cancel to stop the current one."
+        )
+
+    # The runner's per-thread lock handles queuing automatically
+    await _execute_and_reply_inner(update, context, prompt, thread_id)
+
+
+async def _execute_and_reply_inner(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    thread_id: int | None,
+) -> None:
+    """Inner implementation of execute and reply."""
     model = _get_model(context)
     resume = _should_resume(thread_id, context)
 
@@ -411,7 +433,7 @@ async def _execute_and_reply(
 
     import time
 
-    async for line in runner.execute_stream(prompt, model=model, resume=resume):
+    async for line in runner.execute_stream(prompt, thread_id=thread_id, model=model, resume=resume):
         raw_lines.append(line)
         now = time.monotonic()
 
@@ -476,7 +498,7 @@ async def _execute_and_reply(
 
     # Format and send final result
     full_output = "".join(raw_lines)
-    is_error = getattr(runner, "last_exit_code", 0) != 0
+    is_error = runner.get_exit_code(thread_id) != 0
     output = format_output(full_output, is_error)
     chunks = split_message(output)
 
@@ -531,7 +553,12 @@ def main() -> None:
     logger.info("CLI Provider: %s", config.cli_provider)
     logger.info("Timeout: %ds", config.cli_timeout)
 
-    app = Application.builder().token(config.telegram_token).build()
+    app = (
+        Application.builder()
+        .token(config.telegram_token)
+        .concurrent_updates(True)
+        .build()
+    )
 
     # Built-in commands
     app.add_handler(CommandHandler("start", cmd_start))
