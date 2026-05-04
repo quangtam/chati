@@ -1,0 +1,32 @@
+"""Gemini CLI driver.
+
+Headless: gemini -p "prompt" --sandbox=false
+Auth:     GEMINI_API_KEY env var
+Docs:     https://geminicli.com/docs/cli/headless/
+"""
+
+from cli_providers.base import CliProvider
+
+
+class GeminiProvider(CliProvider):
+    provider_id = "gemini"
+    name = "Gemini CLI"
+    default_cli_path = "gemini"
+    response_marker = ""  # Gemini -p outputs response directly
+
+    def build_args(self, prompt, *, model=None, resume=False):
+        args = [self.config.cli_path, "-p"]
+        if self.config.trust_all_tools:
+            args.append("--sandbox=false")
+        if model:
+            args.extend(["--model", model])
+        if self.config.extra_args:
+            args.extend(self.config.extra_args)
+        args.append(prompt)
+        return args
+
+    def build_env(self, base_env):
+        env = self._base_env(base_env)
+        if self.config.api_key:
+            env["GEMINI_API_KEY"] = self.config.api_key
+        return env

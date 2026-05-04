@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+#
+# Chati — management script
+# Usage: chati {start|stop|restart|status|log}
+#
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+PIDFILE="$DIR/.chati.pid"
+LOGFILE="$DIR/chati.log"
+PYTHON="$DIR/.venv/bin/python3"
+SCRIPT="$DIR/chati.py"
+
+# Detect python — prefer python3.14, fall back to python3
+if [[ -x "$DIR/.venv/bin/python3.14" ]]; then
+    PYTHON="$DIR/.venv/bin/python3.14"
+elif [[ -x "$DIR/.venv/bin/python3" ]]; then
+    PYTHON="$DIR/.venv/bin/python3"
+fi
+
+# ── Helpers ──────────────────────────────────────────────────────
+
+is_running() {
+    [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+# ── Commands ─────────────────────────────────────────────────────
+
+cmd_start() {
+    if is_running; then
+        echo "⚡ Chati already running (PID $(cat "$PIDFILE"))"
+        return 0
+    fi
+
+    echo "🚀 Starting Chati..."
+    nohup "$PYTHON" "$SCRIPT" >> "$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    sleep 2
+
+    if is_running; then
+        echo "✅ Chati started (PID $(cat "$PIDFILE"))"
+        echo "   Log: tail -f $LOGFILE"
+    else
+        echo "❌ Chati failed to start. Check log:"
+        tail -5 "$LOGFILE"
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+cmd_stop() {
+    if ! is_running; then
+        echo "ℹ️  Chati is not running"
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    local pid
+    pid=$(cat "$PIDFILE")
+    echo "🛑 Stopping Chati (PID $pid)..."
+    kill "$pid" 2>/dev/null
+
+    for _ in {1..10}; do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.5
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null
+        sleep 1
+    fi
+
+    rm -f "$PIDFILE"
+    echo "✅ Chati stopped"
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 3
+    cmd_start
+}
+
+cmd_status() {
+    if is_running; then
+        local pid
+        pid=$(cat "$PIDFILE")
+        echo "✅ Chati is running (PID $pid)"
+        ps -p "$pid" -o pid,etime,rss,command 2>/dev/null | tail -1
+    else
+        echo "⭕ Chati is not running"
+        rm -f "$PIDFILE"
+    fi
+}
+
+cmd_log() {
+    if [[ -f "$LOGFILE" ]]; then
+        tail -f "$LOGFILE"
+    else
+        echo "No log file found"
+    fi
+}
+
+# ── Main ─────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+    start)   cmd_start   ;;
+    stop)    cmd_stop    ;;
+    restart) cmd_restart ;;
+    status)  cmd_status  ;;
+    log)     cmd_log     ;;
+    *)
+        echo "Usage: chati {start|stop|restart|status|log}"
+        exit 1
+        ;;
+esac
