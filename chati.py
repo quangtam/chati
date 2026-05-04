@@ -364,6 +364,9 @@ _STREAM_UPDATE_INTERVAL = 1.5
 # Max chars to show in streaming preview (keep it readable)
 _STREAM_PREVIEW_MAX = 3000
 
+# Send typing indicator every N seconds to keep Telegram alive
+_TYPING_KEEPALIVE_INTERVAL = 4.0
+
 
 async def _execute_and_reply(
     update: Update,
@@ -372,9 +375,11 @@ async def _execute_and_reply(
 ) -> None:
     """Execute a prompt via CLI with streaming output.
 
-    Sends a single message and edits it progressively as output arrives,
-    giving a ChatGPT-like streaming experience. When done, sends the
-    final formatted result as a new message.
+    Features:
+    - Progressive message edits (ChatGPT-like streaming)
+    - Typing indicator keepalive
+    - Idle watchdog (kills stuck processes)
+    - Sends partial output if process dies mid-stream
     """
     thread_id = _get_thread_id(update)
     model = _get_model(context)
@@ -397,10 +402,10 @@ async def _execute_and_reply(
     raw_lines: list[str] = []
     preview_buffer = ""
     last_edit_time = 0.0
+    last_typing_time = 0.0
     response_started = False
     response_marker = runner.provider.response_marker
 
-    # If provider has no response marker, treat all output as response
     if not response_marker:
         response_started = True
 
@@ -408,13 +413,22 @@ async def _execute_and_reply(
 
     async for line in runner.execute_stream(prompt, model=model, resume=resume):
         raw_lines.append(line)
+        now = time.monotonic()
+
+        # Keep typing indicator alive
+        if now - last_typing_time >= _TYPING_KEEPALIVE_INTERVAL:
+            try:
+                await update.message.reply_chat_action(ChatAction.TYPING)
+                last_typing_time = now
+            except Exception:
+                pass
 
         # Strip ANSI for preview
         clean_line = strip_ansi(line).rstrip()
         if not clean_line:
             continue
 
-        # Detect response start — provider-specific marker
+        # Detect response start
         if response_marker and not response_started and clean_line.startswith(response_marker):
             response_started = True
             clean_line = clean_line[len(response_marker):]
@@ -422,8 +436,6 @@ async def _execute_and_reply(
         if response_started:
             preview_buffer += clean_line + "\n"
 
-            # Update streaming preview periodically
-            now = time.monotonic()
             if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
                 preview = preview_buffer[-_STREAM_PREVIEW_MAX:]
                 if len(preview_buffer) > _STREAM_PREVIEW_MAX:
@@ -442,8 +454,6 @@ async def _execute_and_reply(
                 except Exception:
                     pass
         else:
-            # Show tool activity as status line
-            now = time.monotonic()
             if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
                 status_line = clean_line[:100]
                 try:
@@ -469,6 +479,14 @@ async def _execute_and_reply(
     is_error = getattr(runner, "last_exit_code", 0) != 0
     output = format_output(full_output, is_error)
     chunks = split_message(output)
+
+    if not chunks or all(not c.strip() for c in chunks):
+        # No meaningful output — send a notice
+        await update.message.reply_text(
+            "⚠️ CLI returned no output. The process may have been stuck.\n"
+            "Try /cancel then send your message again."
+        )
+        return
 
     for chunk in chunks:
         await _send_html_with_fallback(update, chunk)

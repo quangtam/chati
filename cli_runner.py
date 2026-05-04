@@ -2,12 +2,13 @@
 
 Uses the CliProvider abstraction to support Kiro, Claude Code,
 Gemini CLI, and Codex CLI with a unified interface.
-Supports streaming output and session resume.
+Supports streaming output, session resume, and stuck detection.
 """
 
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
@@ -15,6 +16,9 @@ from cli_providers import CliProvider, create_provider
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+# If no new output for this many seconds, consider the process stuck
+IDLE_TIMEOUT = 90
 
 
 @dataclass
@@ -34,7 +38,6 @@ class CliRunner:
         self._active_process: asyncio.subprocess.Process | None = None
         self.last_exit_code: int = 0
 
-        # Create the CLI provider
         self._provider: CliProvider = create_provider(
             provider_name=config.cli_provider,
             cli_path=config.cli_path or None,
@@ -51,12 +54,10 @@ class CliRunner:
 
     @property
     def provider(self) -> CliProvider:
-        """The active CLI provider."""
         return self._provider
 
     @property
     def _env(self) -> dict[str, str]:
-        """Build environment variables via the provider."""
         return self._provider.build_env(os.environ.copy())
 
     async def execute(
@@ -88,9 +89,7 @@ class CliRunner:
                 )
             except asyncio.TimeoutError:
                 logger.warning("CLI timed out after %ds", self._config.cli_timeout)
-                process.kill()
-                await process.wait()
-                self._active_process = None
+                await self._kill_process(process)
                 return CliResult(
                     output=f"⏱ CLI timed out after {self._config.cli_timeout}s. "
                     "Use /cancel or try a simpler prompt.",
@@ -128,7 +127,11 @@ class CliRunner:
         model: str | None = None,
         resume: bool = False,
     ) -> AsyncGenerator[str, None]:
-        """Execute a prompt and yield output lines as they arrive."""
+        """Execute a prompt and yield output lines as they arrive.
+
+        Includes idle watchdog: if no output for IDLE_TIMEOUT seconds,
+        the process is killed and a timeout marker is yielded.
+        """
         args = self._provider.build_args(prompt, model=model, resume=resume)
         logger.info("Streaming: %s", " ".join(args))
 
@@ -144,38 +147,60 @@ class CliRunner:
             self._active_process = process
             assert process.stdout is not None
 
-            deadline = asyncio.get_event_loop().time() + self._config.cli_timeout
+            deadline = time.monotonic() + self._config.cli_timeout
+            last_output_time = time.monotonic()
+            idle_warnings = 0
 
             while True:
-                remaining = deadline - asyncio.get_event_loop().time()
-                if remaining <= 0:
-                    logger.warning("Stream timed out after %ds", self._config.cli_timeout)
-                    process.kill()
-                    await process.wait()
-                    self._active_process = None
+                now = time.monotonic()
+
+                # Global timeout
+                if now >= deadline:
+                    logger.warning("Stream global timeout after %ds", self._config.cli_timeout)
+                    await self._kill_process(process)
                     self.last_exit_code = -1
-                    yield f"\n⏱ Timed out after {self._config.cli_timeout}s."
+                    yield "\n⏱ Global timeout reached. Process killed.\n"
                     return
 
+                # Idle watchdog — no output for too long
+                idle_seconds = now - last_output_time
+                if idle_seconds >= IDLE_TIMEOUT:
+                    logger.warning("Stream idle for %ds — killing stuck process", int(idle_seconds))
+                    await self._kill_process(process)
+                    self.last_exit_code = -1
+                    yield f"\n⏱ No output for {int(idle_seconds)}s — process appears stuck. Killed.\n"
+                    return
+
+                # Yield idle warning at halfway point (so user knows it's still working)
+                if idle_seconds >= IDLE_TIMEOUT / 2 and idle_warnings == 0:
+                    idle_warnings = 1
+                    yield f"\n⏳ Waiting for output ({int(idle_seconds)}s)...\n"
+
+                # Read next line with short timeout for responsive watchdog
+                read_timeout = min(10, deadline - now, IDLE_TIMEOUT - idle_seconds)
                 try:
                     line_bytes = await asyncio.wait_for(
                         process.stdout.readline(),
-                        timeout=min(remaining, 60),
+                        timeout=max(read_timeout, 1),
                     )
                 except asyncio.TimeoutError:
-                    if process.returncode is None:
-                        continue
-                    break
+                    # No output yet — check if process is still alive
+                    if process.returncode is not None:
+                        break  # Process exited
+                    continue  # Still running, loop back to watchdog checks
 
                 if not line_bytes:
-                    break
+                    break  # EOF — process closed stdout
 
+                last_output_time = time.monotonic()
+                idle_warnings = 0
                 yield line_bytes.decode("utf-8", errors="replace")
 
             await process.wait()
             self._active_process = None
             self.last_exit_code = process.returncode or 0
 
+            # Read remaining stderr
             if process.stderr:
                 stderr_bytes = await process.stderr.read()
                 stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
@@ -190,12 +215,19 @@ class CliRunner:
             yield f"❌ Unexpected error: {exc}\n"
             logger.exception("Stream error")
 
+    async def _kill_process(self, process: asyncio.subprocess.Process) -> None:
+        """Kill a subprocess and clean up."""
+        try:
+            process.kill()
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except (ProcessLookupError, asyncio.TimeoutError):
+            pass
+        self._active_process = None
+
     async def cancel(self) -> bool:
         """Cancel the currently running CLI process."""
         if self._active_process and self._active_process.returncode is None:
-            self._active_process.kill()
-            await self._active_process.wait()
-            self._active_process = None
+            await self._kill_process(self._active_process)
             logger.info("Cancelled active CLI process")
             return True
         return False
@@ -209,7 +241,6 @@ class CliRunner:
 
         try:
             test_args = self._provider.status_check_args()
-
             process = await asyncio.create_subprocess_exec(
                 *test_args,
                 stdin=asyncio.subprocess.DEVNULL,
