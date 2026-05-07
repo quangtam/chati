@@ -1,0 +1,62 @@
+# Chati v2.0 — Sprint Status
+# Generated: 2026-05-06
+# 
+# STATUS DEFINITIONS:
+#   backlog        — not started, waiting in queue
+#   ready-for-dev  — story file created, ready for implementation
+#   in-progress    — currently being implemented
+#   review         — implementation complete, under review
+#   done           — reviewed, merged, verified
+#
+# EPIC STATUS:
+#   backlog        — no stories started
+#   in-progress    — at least one story started
+#   done           — all stories complete
+
+project: Chati v2.0
+last_updated: 2026-05-06
+
+development_status:
+  # Epic 0: Test Infrastructure (Foundation)
+  epic-0: done
+  0-1-test-infrastructure: done
+
+  # Epic 1: SQLite Persistence & Multi-Project Foundation
+  epic-1: done
+  1-1-sqlite-database-layer: done
+  1-2-thread-to-project-binding: done
+  1-3-project-history-quick-rebinding: done
+  1-4-per-thread-provider-switching: done
+  1-5-configuration-resolution-chain: done
+
+  # Epic 2: Adaptive Timeout & Reliable Streaming
+  epic-2: backlog
+  2-1-session-manager-extraction: backlog
+  2-2-concurrent-session-pool: backlog
+  2-3-adaptive-timeout: backlog
+  2-4-session-operations: backlog
+  2-5-streaming-progressive-edits: backlog
+  2-6-idle-cleanup-status-reporting: backlog
+
+  # Epic 3: Interactive Decision Forwarding
+  epic-3: backlog
+  3-1-decision-prompt-detection: backlog
+  3-2-decision-prompt-forwarding: backlog
+  3-3-decision-reply-piping: backlog
+  3-4-decision-reply-timeout: backlog
+
+  # Epic 4: CLI Information & Session Visibility
+  epic-4: backlog
+  4-1-cli-info-command: backlog
+  4-2-session-list-command: backlog
+  4-3-enhanced-status-help: backlog
+
+  # Epic 5: Screenshot Forwarding (Growth)
+  epic-5: backlog
+  5-1-screenshot-detection-forwarding: backlog
+
+  # Epic 6: Voice Communication (Growth)
+  epic-6: backlog
+  6-1-voice-input-whisper: backlog
+  6-2-voice-output-tts: backlog
+  6-3-voice-configuration: backlog
