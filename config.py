@@ -37,6 +37,9 @@ class Config:
     max_sessions: int = 5
     idle_session_max_age: int = 1800  # 30 minutes
     cleanup_interval: int = 300  # 5 minutes
+    # v2.0: Decision forwarding
+    decision_idle_threshold: int = 12  # seconds before checking for prompt
+    decision_reply_timeout: int = 1800  # 30min for user to reply to decision
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -98,4 +101,6 @@ class Config:
             max_sessions=int(os.getenv("MAX_SESSIONS", "5")),
             idle_session_max_age=int(os.getenv("IDLE_SESSION_MAX_AGE", "1800")),
             cleanup_interval=int(os.getenv("CLEANUP_INTERVAL", "300")),
+            decision_idle_threshold=int(os.getenv("DECISION_IDLE_THRESHOLD", "12")),
+            decision_reply_timeout=int(os.getenv("DECISION_REPLY_TIMEOUT", "1800")),
         )

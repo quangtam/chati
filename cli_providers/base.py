@@ -1,5 +1,6 @@
 """Base class and config for CLI providers."""
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -44,6 +45,11 @@ class CliProvider(ABC):
     # Prefix that marks the start of the actual AI response in stdout.
     # Empty string means all output is treated as response (no tool noise).
     response_marker: str = ""
+
+    # v2.0: Provider-specific decision prompt patterns (optional override).
+    # Used in addition to generic patterns ([y/N], [Y/n], etc.) for detecting
+    # when the CLI is waiting for interactive input.
+    decision_prompt_patterns: list[re.Pattern] = []
 
     def __init__(self, config: CliProviderConfig) -> None:
         self.config = config

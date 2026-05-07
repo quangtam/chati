@@ -31,6 +31,7 @@ from config import Config
 from cli_runner import CliRunner
 from cli_providers import get_available_providers
 from message_utils import format_output, split_message, strip_ansi, extract_final_response
+from session_manager import DecisionPrompt
 import db
 from db import DEFAULT_THREAD_ID, DB_PATH
 
@@ -316,6 +317,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cancel — kill running CLI process for this thread."""
     thread_id = _get_thread_id(update)
+    # Clear any pending decision state for this thread
+    context.bot_data.pop(f"thread:{thread_id}:pending_decision", None)
     cancelled = await runner.cancel(thread_id)
     if cancelled:
         await update.message.reply_text("✅ Cancelled running CLI process.")
@@ -328,6 +331,7 @@ async def cmd_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle /new — reset session for current thread."""
     thread_id = _get_thread_id(update)
     context.user_data["force_new_session"] = True
+    context.bot_data.pop(f"thread:{thread_id}:pending_decision", None)
     _thread_sessions[thread_id] = 0
 
     thread_label = f"thread {thread_id}" if thread_id else "main chat"
@@ -511,9 +515,18 @@ async def handle_bmad_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 @authorized
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle free-form text messages → forward to CLI."""
+    """Handle free-form text messages → forward to CLI (or pipe as decision reply)."""
     text = update.message.text
     if not text or not text.strip():
+        return
+
+    thread_id = _get_thread_id(update)
+    pending_key = f"thread:{thread_id}:pending_decision"
+
+    # If a decision is pending, treat this message as the reply
+    if context.bot_data.get(pending_key):
+        context.bot_data.pop(pending_key, None)
+        await _pipe_decision_reply(update, context, text.strip(), thread_id)
         return
 
     await _execute_and_reply(update, context, text.strip())
@@ -557,6 +570,170 @@ async def _execute_and_reply(
 
     # The runner's per-thread lock handles queuing automatically
     await _execute_and_reply_inner(update, context, prompt, thread_id)
+
+
+async def _handle_decision_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    decision: DecisionPrompt,
+    thread_id: int | None,
+) -> None:
+    """Forward a detected CLI decision prompt to the user via Telegram.
+
+    Sets pending_decision flag in bot_data so the next user message is
+    treated as a reply to this prompt (see handle_message).
+    """
+    context_text = "\n".join(decision.context_lines[-5:])
+    msg = (
+        "⚠️ <b>CLI is waiting for input</b>\n\n"
+        f"<pre>{_escape_html(context_text)}</pre>\n\n"
+        "Reply to proceed, or /cancel to abort."
+    )
+    try:
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.exception("[decision] failed to forward prompt: %s", exc)
+        await update.message.reply_text(
+            "⚠️ CLI is waiting for input. Reply to proceed or /cancel to abort."
+        )
+    logger.info(
+        "[decision] forwarded to user [thread=%s]: %s",
+        thread_id, decision.prompt_text[:80],
+    )
+
+
+async def _pipe_decision_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    reply: str,
+    thread_id: int | None,
+) -> None:
+    """Pipe user's reply to the waiting CLI session and stream remaining output."""
+    logger.info("[pipe_reply] routing user message as decision reply [thread=%s]", thread_id)
+
+    # Resolve per-thread config for timeout
+    try:
+        resolved = await db.resolve_thread_config(
+            thread_id if thread_id is not None else DEFAULT_THREAD_ID,
+            env_project_dir=config.project_dir,
+            env_cli_provider=config.cli_provider,
+            env_timeout_seconds=config.cli_timeout,
+            path=DB_PATH,
+        )
+        resolved_timeout = resolved.timeout_seconds
+    except Exception:
+        resolved_timeout = config.cli_timeout
+
+    await _stream_to_telegram(
+        update, context, thread_id,
+        stream=runner.pipe_reply_stream(
+            thread_id=thread_id, reply=reply, timeout_seconds=resolved_timeout,
+        ),
+    )
+
+
+async def _stream_to_telegram(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    thread_id: int | None,
+    stream,
+) -> None:
+    """Shared stream-to-Telegram helper for both execute and pipe_reply paths.
+
+    Handles DecisionPrompt yields, preview edits, final response formatting.
+    """
+    chat_id = update.effective_chat.id
+
+    try:
+        preview_msg = await update.message.reply_text("⏳ Connecting...")
+    except Exception as exc:
+        logger.exception("Failed to send preview message: %s", exc)
+        return
+
+    typing_active = True
+
+    async def _typing_keepalive():
+        while typing_active:
+            try:
+                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            except Exception:
+                pass
+            await asyncio.sleep(_TYPING_KEEPALIVE_INTERVAL)
+
+    typing_task = asyncio.create_task(_typing_keepalive())
+
+    raw_lines: list[str] = []
+    preview_buffer = ""
+    last_edit_time = 0.0
+    response_started = False
+    response_marker = runner.provider.response_marker
+    if not response_marker:
+        response_started = True
+
+    import time as _t
+
+    try:
+        async for line in stream:
+            if isinstance(line, DecisionPrompt):
+                context.bot_data[f"thread:{thread_id}:pending_decision"] = True
+                await _handle_decision_prompt(update, context, line, thread_id)
+                typing_active = False
+                if not typing_task.done():
+                    typing_task.cancel()
+                # Delete preview placeholder (decision prompt sent separately)
+                try:
+                    await preview_msg.delete()
+                except Exception:
+                    pass
+                return
+
+            raw_lines.append(line)
+            now = _t.monotonic()
+            clean_line = strip_ansi(line).rstrip()
+            if not clean_line:
+                continue
+
+            if response_marker and not response_started and clean_line.startswith(response_marker):
+                response_started = True
+
+            if response_started:
+                preview_buffer += clean_line + "\n"
+                if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
+                    preview = preview_buffer[-_STREAM_PREVIEW_MAX:]
+                    if len(preview_buffer) > _STREAM_PREVIEW_MAX:
+                        preview = "...\n" + preview
+                    try:
+                        await preview_msg.edit_text(f"<pre>{_escape_html(preview)}</pre>", parse_mode=ParseMode.HTML)
+                        last_edit_time = now
+                    except Exception:
+                        pass
+            else:
+                if now - last_edit_time >= _STREAM_UPDATE_INTERVAL:
+                    status_line = clean_line[:100]
+                    try:
+                        await preview_msg.edit_text(f"🔧 {_escape_html(status_line)}", parse_mode=ParseMode.HTML)
+                        last_edit_time = now
+                    except Exception:
+                        pass
+    finally:
+        typing_active = False
+        if not typing_task.done():
+            typing_task.cancel()
+
+    # Compose final response
+    raw_output = "".join(raw_lines)
+    final = format_output(raw_output)
+    if not final.strip():
+        final = "(CLI returned no output)"
+
+    # Delete preview, send final
+    try:
+        await preview_msg.delete()
+    except Exception:
+        pass
+
+    for chunk in split_message(final):
+        await _send_html_with_fallback(update, chunk)
 
 
 async def _execute_and_reply_inner(
@@ -632,6 +809,15 @@ async def _execute_and_reply_inner(
             resume=resume,
             timeout_seconds=resolved_timeout,
         ):
+            # Handle DecisionPrompt — CLI is waiting for user input
+            if isinstance(line, DecisionPrompt):
+                context.bot_data[f"thread:{thread_id}:pending_decision"] = True
+                await _handle_decision_prompt(update, context, line, thread_id)
+                typing_active = False
+                if not typing_task.done():
+                    typing_task.cancel()
+                return  # Exit the handler; next user message will trigger pipe_reply
+
             raw_lines.append(line)
             now = time.monotonic()
 
@@ -809,6 +995,27 @@ def main() -> None:
                     orphans = runner._session_mgr.cleanup_orphans()
                     if orphans:
                         logger.warning("[cleanup_orphans] killed %d orphan sessions", orphans)
+
+                    # Expired decision replies
+                    expired = runner._session_mgr.expired_decisions(
+                        max_wait_seconds=config.decision_reply_timeout
+                    )
+                    for tid in expired:
+                        logger.warning("[decision] reply timeout [thread=%s]", tid)
+                        app_.bot_data.pop(f"thread:{tid}:pending_decision", None)
+                        # Kill session — state may transition to DEAD
+                        runner._session_mgr.kill(tid)
+                        # Notify user via bot
+                        try:
+                            # Notify the last known chat for this thread
+                            # We don't know chat_id without explicit tracking;
+                            # the next user message in this thread will get "session expired"
+                            logger.info(
+                                "[decision] auto-killed thread %s — user will be notified on next message",
+                                tid,
+                            )
+                        except Exception as exc:
+                            logger.exception("[decision] notify failed: %s", exc)
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
@@ -816,8 +1023,9 @@ def main() -> None:
 
         app_.bot_data["_cleanup_task"] = asyncio.create_task(_cleanup_loop())
         logger.info(
-            "Started background cleanup task (interval=%ds, idle_max=%ds)",
+            "Started background cleanup task (interval=%ds, idle_max=%ds, decision_timeout=%ds)",
             config.cleanup_interval, config.idle_session_max_age,
+            config.decision_reply_timeout,
         )
 
     async def _post_shutdown(app_):

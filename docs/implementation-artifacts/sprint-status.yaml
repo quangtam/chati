@@ -39,11 +39,11 @@ development_status:
   2-6-idle-cleanup-status-reporting: done
 
   # Epic 3: Interactive Decision Forwarding
-  epic-3: backlog
-  3-1-decision-prompt-detection: backlog
-  3-2-decision-prompt-forwarding: backlog
-  3-3-decision-reply-piping: backlog
-  3-4-decision-reply-timeout: backlog
+  epic-3: done
+  3-1-decision-prompt-detection: done
+  3-2-decision-prompt-forwarding: done
+  3-3-decision-reply-piping: done
+  3-4-decision-reply-timeout: done
 
   # Epic 4: CLI Information & Session Visibility
   epic-4: backlog

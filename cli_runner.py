@@ -22,7 +22,14 @@ from dataclasses import dataclass
 
 from cli_providers import CliProvider, create_provider
 from config import Config
-from session_manager import PtySession, PtyState, SessionLimitExceeded, SessionManager
+from session_manager import (
+    DecisionPrompt,
+    PtySession,
+    PtyState,
+    SessionLimitExceeded,
+    SessionManager,
+    detect_decision_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +209,7 @@ class CliRunner:
         model: str | None = None,
         resume: bool = False,
         timeout_seconds: int | None = None,
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator["str | DecisionPrompt", None]:
         """Execute a prompt and yield output lines.
 
         Args:
@@ -230,14 +237,20 @@ class CliRunner:
         prompt: str,
         thread_id: int | None,
         timeout_seconds: int | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """Send prompt to PTY session and yield response chunks.
+    ) -> AsyncGenerator["str | DecisionPrompt", None]:
+        """Send prompt to PTY session and yield response chunks or DecisionPrompt.
+
+        If an interactive prompt is detected, yields a DecisionPrompt and
+        RETURNS (generator ends). Caller should then call pipe_reply_stream().
 
         Args:
             timeout_seconds: Per-thread timeout override. If None, uses global.
         """
         loop = asyncio.get_event_loop()
         effective_timeout = timeout_seconds or self._config.cli_timeout
+        decision_idle_threshold = getattr(
+            self._config, "decision_idle_threshold", 12
+        )
 
         # Transition: IDLE → STREAMING when prompt written
         if self._session_mgr.get_state(thread_id) == PtyState.IDLE:
@@ -262,25 +275,32 @@ class CliRunner:
         deadline = time.monotonic() + effective_timeout
         last_output_time = time.monotonic()
         last_warn_time = 0.0
-        # Time spent in WAITING_FOR_USER state (paused — doesn't count toward timeout)
+        # Time spent in WAITING_FOR_USER — paused from timeout accounting
         paused_duration = 0.0
         pause_start: float | None = None
+        # Rolling buffer of recent output lines for decision detection
+        line_buffer: list[str] = []
+        # Track if we've checked for decision prompt in this idle window
+        decision_checked_for_window = False
+
+        # Provider-specific decision patterns (optional)
+        provider_patterns = getattr(
+            self._provider, "decision_prompt_patterns", None
+        ) or None
 
         while True:
             now = time.monotonic()
-
-            # If session is in WAITING_FOR_USER, pause the clock
             current_state = self._session_mgr.get_state(thread_id)
+
+            # Pause clock during WAITING_FOR_USER
             if current_state == PtyState.WAITING_FOR_USER:
                 if pause_start is None:
                     pause_start = now
-                # Don't increment deadline checks; just read
             else:
                 if pause_start is not None:
                     paused_duration += now - pause_start
                     pause_start = None
 
-            # Effective deadline accounts for paused time
             effective_deadline = deadline + paused_duration
 
             if now >= effective_deadline and current_state != PtyState.WAITING_FOR_USER:
@@ -304,6 +324,52 @@ class CliRunner:
                 return
 
             idle_seconds = now - last_output_time - paused_duration
+
+            # Decision prompt detection (only during STREAMING, after idle threshold)
+            if (
+                current_state == PtyState.STREAMING
+                and idle_seconds >= decision_idle_threshold
+                and not decision_checked_for_window
+            ):
+                decision_checked_for_window = True
+                # Transition STREAMING → DETECTING_PROMPT
+                try:
+                    self._session_mgr.transition(
+                        thread_id, PtyState.DETECTING_PROMPT,
+                        reason=f"idle {int(idle_seconds)}s",
+                    )
+                except (KeyError, RuntimeError) as exc:
+                    logger.debug("[decision] transition skipped: %s", exc)
+                else:
+                    decision = detect_decision_prompt(
+                        line_buffer,
+                        provider_patterns=provider_patterns,
+                    )
+                    if decision is not None:
+                        # Match! Transition → WAITING_FOR_USER and yield
+                        try:
+                            self._session_mgr.transition(
+                                thread_id, PtyState.WAITING_FOR_USER,
+                                reason=f"prompt detected: {decision.prompt_text[:40]}",
+                            )
+                        except (KeyError, RuntimeError):
+                            pass
+                        logger.info(
+                            "[decision] detected [thread=%s]: %s",
+                            thread_id, decision.prompt_text[:80],
+                        )
+                        yield decision
+                        return  # Option B: generator ends, caller picks up
+                    else:
+                        # False alarm — back to STREAMING
+                        try:
+                            self._session_mgr.transition(
+                                thread_id, PtyState.STREAMING,
+                                reason="no prompt match",
+                            )
+                        except (KeyError, RuntimeError):
+                            pass
+
             if (
                 idle_seconds >= IDLE_WARN_INTERVAL
                 and now - last_warn_time >= IDLE_WARN_INTERVAL
@@ -313,26 +379,228 @@ class CliRunner:
                 yield f"\n⏳ Still working... no output for {int(idle_seconds)}s (timeout in {remaining}s)\n"
                 last_warn_time = now
 
-            # Read from PTY (non-blocking via dedicated executor)
+            # Read from PTY
             chunk = await loop.run_in_executor(
                 self._session_mgr.pty_executor, lambda: session.read(timeout=2.0)
             )
 
             if chunk is None:
-                continue  # Timeout, no data yet
+                continue  # no data yet
             if chunk == "":
-                # EOF — process died
                 self._kill_session(thread_id)
                 self._exit_codes[thread_id] = -1
                 break
 
-            # Only reset timeout on "meaningful" output (contains newline)
-            # Single-byte streams (progress bars) don't count as progress
+            # Meaningful output (contains newline) resets timeout + decision window
             if "\n" in chunk:
                 last_output_time = time.monotonic()
                 last_warn_time = 0.0
+                decision_checked_for_window = False
+                # Append chunk's lines to buffer (keep last 20 for detection context)
+                for line in chunk.split("\n"):
+                    if line.strip():
+                        line_buffer.append(line)
+                if len(line_buffer) > 20:
+                    line_buffer = line_buffer[-20:]
 
-            # Check if we've hit the next prompt → response complete
+            # Check for prompt marker → response complete
+            clean = _ANSI_RE.sub("", chunk)
+            if _PROMPT_RE.search(clean.rstrip()):
+                before_prompt = _PROMPT_RE.split(clean.rstrip())[0]
+                if before_prompt.strip():
+                    yield before_prompt
+                self._exit_codes[thread_id] = 0
+                try:
+                    self._session_mgr.transition(
+                        thread_id, PtyState.IDLE, reason="response marker reached"
+                    )
+                except (KeyError, RuntimeError):
+                    pass
+                break
+
+            yield chunk
+
+    async def pipe_reply_stream(
+        self,
+        thread_id: int | None,
+        reply: str,
+        timeout_seconds: int | None = None,
+    ) -> AsyncGenerator["str | DecisionPrompt", None]:
+        """Pipe user reply to a waiting session and resume streaming.
+
+        Called after execute_stream yielded DecisionPrompt and returned.
+        New generator — pipes reply, yields remaining output until next
+        prompt marker (or another DecisionPrompt for chained decisions).
+        """
+        lock = self._get_lock(thread_id)
+
+        async with lock:
+            session = self._session_mgr.get(thread_id)
+            if session is None or not session.alive:
+                yield "❌ Session no longer available. Send a new message to start fresh.\n"
+                return
+
+            current_state = self._session_mgr.get_state(thread_id)
+            if current_state != PtyState.WAITING_FOR_USER:
+                logger.warning(
+                    "[pipe_reply] unexpected state [thread=%s]: %s",
+                    thread_id, current_state,
+                )
+            else:
+                try:
+                    self._session_mgr.transition(
+                        thread_id, PtyState.PIPING_REPLY, reason="user reply"
+                    )
+                except (KeyError, RuntimeError) as exc:
+                    logger.debug("[pipe_reply] transition skipped: %s", exc)
+
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(
+                    self._session_mgr.pty_executor,
+                    lambda: session.write(reply + "\n"),
+                )
+            except OSError as exc:
+                logger.warning("[pipe_reply] write failed [thread=%s]: %s", thread_id, exc)
+                self._kill_session(thread_id)
+                yield "❌ Failed to send reply to CLI. Session ended.\n"
+                return
+
+            logger.info("[pipe_reply] wrote reply [thread=%s]: %s", thread_id, reply[:80])
+
+            try:
+                self._session_mgr.transition(
+                    thread_id, PtyState.STREAMING, reason="reply piped"
+                )
+            except (KeyError, RuntimeError):
+                pass
+
+            async for chunk in self._stream_pty_read_loop(
+                session, thread_id, timeout_seconds=timeout_seconds
+            ):
+                yield chunk
+
+    async def _stream_pty_read_loop(
+        self,
+        session: PtySession,
+        thread_id: int | None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncGenerator["str | DecisionPrompt", None]:
+        """Shared read loop — reads output, detects decision prompts + response marker."""
+        loop = asyncio.get_event_loop()
+        effective_timeout = timeout_seconds or self._config.cli_timeout
+        decision_idle_threshold = getattr(self._config, "decision_idle_threshold", 12)
+
+        deadline = time.monotonic() + effective_timeout
+        last_output_time = time.monotonic()
+        last_warn_time = 0.0
+        paused_duration = 0.0
+        pause_start: float | None = None
+        line_buffer: list[str] = []
+        decision_checked_for_window = False
+        provider_patterns = getattr(self._provider, "decision_prompt_patterns", None) or None
+
+        while True:
+            now = time.monotonic()
+            current_state = self._session_mgr.get_state(thread_id)
+
+            if current_state == PtyState.WAITING_FOR_USER:
+                if pause_start is None:
+                    pause_start = now
+            else:
+                if pause_start is not None:
+                    paused_duration += now - pause_start
+                    pause_start = None
+
+            effective_deadline = deadline + paused_duration
+
+            if now >= effective_deadline and current_state != PtyState.WAITING_FOR_USER:
+                logger.warning("[read_loop] timeout [thread=%s]", thread_id)
+                self._kill_session(thread_id)
+                self._exit_codes[thread_id] = -1
+                yield "\n⏱ Global timeout reached. Session killed.\n"
+                return
+
+            if not session.alive:
+                self._exit_codes[thread_id] = -1
+                if self._session_mgr.get(thread_id) is not None:
+                    try:
+                        self._session_mgr.transition(
+                            thread_id, PtyState.DEAD, reason="process died"
+                        )
+                    except (KeyError, RuntimeError):
+                        pass
+                    self._session_mgr.kill(thread_id)
+                yield "\n❌ CLI process died unexpectedly.\n"
+                return
+
+            idle_seconds = now - last_output_time - paused_duration
+
+            if (
+                current_state == PtyState.STREAMING
+                and idle_seconds >= decision_idle_threshold
+                and not decision_checked_for_window
+            ):
+                decision_checked_for_window = True
+                try:
+                    self._session_mgr.transition(
+                        thread_id, PtyState.DETECTING_PROMPT,
+                        reason=f"idle {int(idle_seconds)}s",
+                    )
+                except (KeyError, RuntimeError):
+                    pass
+                else:
+                    decision = detect_decision_prompt(
+                        line_buffer, provider_patterns=provider_patterns
+                    )
+                    if decision is not None:
+                        try:
+                            self._session_mgr.transition(
+                                thread_id, PtyState.WAITING_FOR_USER,
+                                reason=f"chained prompt: {decision.prompt_text[:40]}",
+                            )
+                        except (KeyError, RuntimeError):
+                            pass
+                        yield decision
+                        return
+                    else:
+                        try:
+                            self._session_mgr.transition(
+                                thread_id, PtyState.STREAMING, reason="no prompt match"
+                            )
+                        except (KeyError, RuntimeError):
+                            pass
+
+            if (
+                idle_seconds >= IDLE_WARN_INTERVAL
+                and now - last_warn_time >= IDLE_WARN_INTERVAL
+                and current_state != PtyState.WAITING_FOR_USER
+            ):
+                remaining = int(effective_deadline - now)
+                yield f"\n⏳ Still working... no output for {int(idle_seconds)}s (timeout in {remaining}s)\n"
+                last_warn_time = now
+
+            chunk = await loop.run_in_executor(
+                self._session_mgr.pty_executor, lambda: session.read(timeout=2.0)
+            )
+
+            if chunk is None:
+                continue
+            if chunk == "":
+                self._kill_session(thread_id)
+                self._exit_codes[thread_id] = -1
+                break
+
+            if "\n" in chunk:
+                last_output_time = time.monotonic()
+                last_warn_time = 0.0
+                decision_checked_for_window = False
+                for line in chunk.split("\n"):
+                    if line.strip():
+                        line_buffer.append(line)
+                if len(line_buffer) > 20:
+                    line_buffer = line_buffer[-20:]
+
             clean = _ANSI_RE.sub("", chunk)
             if _PROMPT_RE.search(clean.rstrip()):
                 before_prompt = _PROMPT_RE.split(clean.rstrip())[0]

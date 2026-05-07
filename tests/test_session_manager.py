@@ -400,3 +400,54 @@ class TestTransitionUpdatesLastActive:
 
         mgr.transition(1, PtyState.STREAMING, reason="test")
         assert session.last_active_at > old_active - 100
+
+
+class TestExpiredDecisions:
+    def test_no_expired_when_none_waiting(self):
+        mgr = SessionManager()
+        mgr.create(thread_id=1, pid=2**22, fd=0)
+        # Session in IDLE, not WAITING_FOR_USER
+        expired = mgr.expired_decisions(max_wait_seconds=1800)
+        assert expired == []
+
+    def test_expired_after_threshold(self):
+        mgr = SessionManager()
+        mgr.create(thread_id=1, pid=2**22, fd=0)
+        mgr.transition(1, PtyState.STREAMING, reason="start")
+        mgr.transition(1, PtyState.DETECTING_PROMPT, reason="idle")
+        mgr.transition(1, PtyState.WAITING_FOR_USER, reason="prompt")
+        # Backdate last_active_at to simulate long wait
+        mgr.get(1).last_active_at = _time.monotonic() - 3600
+
+        expired = mgr.expired_decisions(max_wait_seconds=1800)
+        assert expired == [1]
+
+    def test_not_expired_when_recent(self):
+        mgr = SessionManager()
+        mgr.create(thread_id=1, pid=2**22, fd=0)
+        mgr.transition(1, PtyState.STREAMING, reason="start")
+        mgr.transition(1, PtyState.DETECTING_PROMPT, reason="idle")
+        mgr.transition(1, PtyState.WAITING_FOR_USER, reason="prompt")
+        # Fresh — transition just happened
+
+        expired = mgr.expired_decisions(max_wait_seconds=1800)
+        assert expired == []
+
+    def test_only_waiting_for_user_considered(self):
+        mgr = SessionManager()
+        # Create multiple sessions in different states, all with old last_active_at
+        mgr.create(thread_id=1, pid=2**22, fd=0)  # IDLE
+        mgr.create(thread_id=2, pid=2**22 + 1, fd=0)
+        mgr.transition(2, PtyState.STREAMING, reason="start")  # STREAMING
+        mgr.create(thread_id=3, pid=2**22 + 2, fd=0)
+        mgr.transition(3, PtyState.STREAMING, reason="start")
+        mgr.transition(3, PtyState.DETECTING_PROMPT, reason="idle")
+        mgr.transition(3, PtyState.WAITING_FOR_USER, reason="prompt")
+
+        # Backdate all
+        for tid in [1, 2, 3]:
+            mgr.get(tid).last_active_at = _time.monotonic() - 3600
+
+        expired = mgr.expired_decisions(max_wait_seconds=1800)
+        # Only thread 3 (WAITING_FOR_USER) returned
+        assert expired == [3]

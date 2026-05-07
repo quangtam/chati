@@ -15,6 +15,7 @@ State machine:
 import concurrent.futures
 import logging
 import os
+import re
 import select
 import signal
 import time
@@ -26,6 +27,85 @@ logger = logging.getLogger(__name__)
 
 class SessionLimitExceeded(Exception):
     """Raised when attempting to create a session beyond MAX_SESSIONS."""
+
+
+@dataclass
+class DecisionPrompt:
+    """Represents a detected CLI interactive prompt requiring user input.
+
+    Yielded from the streaming generator when the CLI is waiting for
+    a response (e.g., "Continue? [y/N]"). Consumer (chati.py) forwards
+    this to the user via Telegram, then calls pipe_reply_stream() to
+    resume execution once user replies.
+    """
+
+    prompt_text: str
+    context_lines: list[str]
+
+
+# ─── Prompt detection ─────────────────────────────────────────
+
+_GENERIC_PROMPT_PATTERNS = [
+    re.compile(r"\[y/N\]", re.IGNORECASE),
+    re.compile(r"\[Y/n\]", re.IGNORECASE),
+    re.compile(r"\(yes/no\)", re.IGNORECASE),
+    re.compile(r"\(y/n\)", re.IGNORECASE),
+]
+
+
+def detect_decision_prompt(
+    buffer_lines: list[str],
+    provider_patterns: list[re.Pattern] | None = None,
+    max_line_length: int = 100,
+) -> DecisionPrompt | None:
+    """Detect CLI interactive prompt from recent output lines.
+
+    Detection rules:
+    - Last non-empty line must be ≤ max_line_length chars (real prompts are short)
+    - Line must match a generic or provider-specific pattern, OR end with '?'
+
+    Returns:
+        DecisionPrompt with prompt_text + last 5 context_lines, or None.
+    """
+    if not buffer_lines:
+        return None
+
+    # Find last non-empty line
+    last_line = ""
+    for line in reversed(buffer_lines):
+        stripped = line.rstrip("\n").strip()
+        if stripped:
+            last_line = stripped
+            break
+
+    if not last_line or len(last_line) > max_line_length:
+        return None
+
+    # Check generic patterns
+    for pat in _GENERIC_PROMPT_PATTERNS:
+        if pat.search(last_line):
+            return DecisionPrompt(
+                prompt_text=last_line,
+                context_lines=[line.rstrip("\n") for line in buffer_lines[-5:]],
+            )
+
+    # Check provider-specific patterns
+    if provider_patterns:
+        for pat in provider_patterns:
+            if pat.search(last_line):
+                return DecisionPrompt(
+                    prompt_text=last_line,
+                    context_lines=[line.rstrip("\n") for line in buffer_lines[-5:]],
+                )
+
+    # Fallback: ends with '?'
+    if last_line.endswith("?"):
+        return DecisionPrompt(
+            prompt_text=last_line,
+            context_lines=[line.rstrip("\n") for line in buffer_lines[-5:]],
+        )
+
+    return None
 
 
 class PtyState(Enum):
@@ -256,14 +336,20 @@ class SessionManager:
             logger.info(f"[SessionManager] cleanup_orphans: cleaned up {len(orphans)} orphan sessions")
         return len(orphans)
 
+    @staticmethod
+    def get_status_emoji(state: PtyState) -> str:
+        """Return Telegram-friendly status emoji for a PtyState."""
+        return {
+            PtyState.IDLE: "💤",
+            PtyState.STREAMING: "🟢",
+            PtyState.DETECTING_PROMPT: "🟢",
+            PtyState.WAITING_FOR_USER: "⏳",
+            PtyState.PIPING_REPLY: "🟢",
+            PtyState.DEAD: "❌",
+        }.get(state, "❓")
+
     def cleanup_idle(self, max_age_seconds: int = 1800) -> int:
-        """Kill sessions idle (IDLE state) for longer than max_age_seconds.
-
-        Only targets IDLE sessions — STREAMING, WAITING_FOR_USER, etc. are active.
-
-        Returns:
-            Number of idle sessions cleaned up.
-        """
+        """Kill sessions idle (IDLE state) for longer than max_age_seconds."""
         now = time.monotonic()
         to_kill: list[int | None] = []
         for tid, session in list(self._sessions.items()):
@@ -280,14 +366,17 @@ class SessionManager:
             self.kill(tid)
         return len(to_kill)
 
-    @staticmethod
-    def get_status_emoji(state: PtyState) -> str:
-        """Return Telegram-friendly status emoji for a PtyState."""
-        return {
-            PtyState.IDLE: "💤",
-            PtyState.STREAMING: "🟢",
-            PtyState.DETECTING_PROMPT: "🟢",
-            PtyState.WAITING_FOR_USER: "⏳",
-            PtyState.PIPING_REPLY: "🟢",
-            PtyState.DEAD: "❌",
-        }.get(state, "❓")
+    def expired_decisions(self, max_wait_seconds: int = 1800) -> list[int | None]:
+        """Return thread_ids where WAITING_FOR_USER has exceeded max_wait_seconds.
+
+        Does NOT kill — caller handles notification then kill.
+        """
+        now = time.monotonic()
+        expired: list[int | None] = []
+        for tid, session in self._sessions.items():
+            if (
+                session.state == PtyState.WAITING_FOR_USER
+                and (now - session.last_active_at) > max_wait_seconds
+            ):
+                expired.append(tid)
+        return expired
