@@ -607,8 +607,31 @@ async def _execute_and_reply_inner(
 
     import time
 
+    # Resolve per-thread config (provider, model, timeout from SQLite with .env fallback)
     try:
-        async for line in runner.execute_stream(prompt, thread_id=thread_id, model=model, resume=resume):
+        resolved = await db.resolve_thread_config(
+            thread_id if thread_id is not None else DEFAULT_THREAD_ID,
+            env_project_dir=config.project_dir,
+            env_cli_provider=config.cli_provider,
+            env_model=model,
+            env_timeout_seconds=config.cli_timeout,
+            path=DB_PATH,
+        )
+        resolved_timeout = resolved.timeout_seconds
+        resolved_model = resolved.model or model
+    except Exception as exc:
+        logger.warning("[resolve_thread_config] fallback to defaults: %s", exc)
+        resolved_timeout = config.cli_timeout
+        resolved_model = model
+
+    try:
+        async for line in runner.execute_stream(
+            prompt,
+            thread_id=thread_id,
+            model=resolved_model,
+            resume=resume,
+            timeout_seconds=resolved_timeout,
+        ):
             raw_lines.append(line)
             now = time.monotonic()
 
@@ -771,6 +794,41 @@ def main() -> None:
 
     # Error handler
     app.add_error_handler(error_handler)
+
+    # Background: idle session cleanup (runs every N seconds)
+    async def _post_init(app_):
+        async def _cleanup_loop():
+            while True:
+                try:
+                    await asyncio.sleep(config.cleanup_interval)
+                    killed = runner._session_mgr.cleanup_idle(
+                        max_age_seconds=config.idle_session_max_age
+                    )
+                    if killed:
+                        logger.info("[cleanup_idle] killed %d idle sessions", killed)
+                    orphans = runner._session_mgr.cleanup_orphans()
+                    if orphans:
+                        logger.warning("[cleanup_orphans] killed %d orphan sessions", orphans)
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.exception("[cleanup_loop] error: %s", exc)
+
+        app_.bot_data["_cleanup_task"] = asyncio.create_task(_cleanup_loop())
+        logger.info(
+            "Started background cleanup task (interval=%ds, idle_max=%ds)",
+            config.cleanup_interval, config.idle_session_max_age,
+        )
+
+    async def _post_shutdown(app_):
+        task = app_.bot_data.get("_cleanup_task")
+        if task:
+            task.cancel()
+        runner._session_mgr.shutdown()
+        logger.info("Session manager shut down")
+
+    app.post_init = _post_init
+    app.post_shutdown = _post_shutdown
 
     # Start polling
     logger.info("Bot is running. Press Ctrl+C to stop.")

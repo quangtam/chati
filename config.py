@@ -33,6 +33,11 @@ class Config:
     trust_all_tools: bool
     log_level: str
 
+    # v2.0: Resource limits
+    max_sessions: int = 5
+    idle_session_max_age: int = 1800  # 30 minutes
+    cleanup_interval: int = 300  # 5 minutes
+
     @classmethod
     def from_env(cls) -> "Config":
         token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -90,4 +95,7 @@ class Config:
                 os.getenv("KIRO_TRUST_ALL_TOOLS", "true"),
             ).lower() == "true",
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+            max_sessions=int(os.getenv("MAX_SESSIONS", "5")),
+            idle_session_max_age=int(os.getenv("IDLE_SESSION_MAX_AGE", "1800")),
+            cleanup_interval=int(os.getenv("CLEANUP_INTERVAL", "300")),
         )

@@ -30,13 +30,13 @@ development_status:
   1-5-configuration-resolution-chain: done
 
   # Epic 2: Adaptive Timeout & Reliable Streaming
-  epic-2: backlog
-  2-1-session-manager-extraction: backlog
-  2-2-concurrent-session-pool: backlog
-  2-3-adaptive-timeout: backlog
-  2-4-session-operations: backlog
-  2-5-streaming-progressive-edits: backlog
-  2-6-idle-cleanup-status-reporting: backlog
+  epic-2: done
+  2-1-session-manager-extraction: done
+  2-2-concurrent-session-pool: done
+  2-3-adaptive-timeout: done
+  2-4-session-operations: done
+  2-5-streaming-progressive-edits: done
+  2-6-idle-cleanup-status-reporting: done
 
   # Epic 3: Interactive Decision Forwarding
   epic-3: backlog
