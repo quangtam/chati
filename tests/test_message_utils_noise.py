@@ -103,13 +103,13 @@ class TestStripStreamingNoise:
 
     def test_embedded_braille_in_real_line_stripped(self):
         # Rare: braille char appears inline with real content
+        # New behavior: preserve braille in real content lines (not spinner)
         text = "Step ⠋ 1 of 5"
         out = strip_streaming_noise(text)
-        # Either the whole line is kept minus braille, or removed if it was spinner.
-        # "Step  1 of 5" is real content → must survive
+        # Real content preserved intact (braille is NOT stripped from non-spinner lines)
         assert "Step" in out
         assert "1 of 5" in out
-        assert "⠋" not in out
+        assert "⠋" in out  # preserved — it's real content, not a spinner frame
 
     def test_bare_braille_line_removed(self):
         text = "⠋\n⠙\n⠹\n"

@@ -9,31 +9,6 @@ import pytest
 from db import DEFAULT_THREAD_ID, get_thread_config, init_db, upsert_thread_config
 
 
-@pytest.fixture(autouse=True)
-def patch_allowed_users():
-    """Allow test user IDs through auth decorator."""
-    import chati
-    original = chati.config
-
-    class _ConfigShim:
-        def __init__(self, orig):
-            self._orig = orig
-            self.allowed_user_ids = frozenset({123456789, 999, 888})
-
-        def __getattr__(self, name):
-            return getattr(self._orig, name)
-
-    chati.config = _ConfigShim(original)
-    yield
-    chati.config = original
-
-
-@pytest.fixture
-def temp_db_path():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield os.path.join(tmpdir, "test_chati.db")
-
-
 @pytest.fixture
 def clean_runner():
     """Ensure runner has no active sessions during test."""

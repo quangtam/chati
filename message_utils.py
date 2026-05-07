@@ -39,7 +39,7 @@ _BRAILLE_SPINNER_RE = re.compile(r"[\u2800-\u28FF]")
 _SPINNER_LINE_RE = re.compile(
     r"^[ \t]*(?:"
     r"[\u2800-\u28FF]+[ \t]*(?:Thinking|Loading|Waiting|Processing|Working)?\.{0,}"
-    r"|[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)\.{0,}"
+    r"|[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)\.{2,}"
     r"|Thinking\.{2,}"
     r"|Loading\.{2,}"
     r"|\.{3,}"
@@ -84,13 +84,17 @@ def strip_streaming_noise(text: str) -> str:
         line = _collapse_carriage_returns(raw)
         if _SPINNER_LINE_RE.match(line):
             continue
-        # Also strip any remaining standalone braille spinner chars embedded
-        # in otherwise real lines (rare but seen with some CLIs)
-        cleaned = _BRAILLE_SPINNER_RE.sub("", line).rstrip()
-        # If stripping braille chars emptied the line, skip it
-        if not cleaned.strip() and line.strip():
-            continue
-        out_lines.append(cleaned if cleaned != line else line)
+        # Strip braille spinner chars only if the line looks like a spinner
+        # (contains braille + optional spinner keywords). Preserve braille in
+        # real content (accessibility docs, Unicode art, etc.)
+        if _BRAILLE_SPINNER_RE.search(line):
+            # Only strip if line is mostly braille + whitespace + spinner words
+            without_braille = _BRAILLE_SPINNER_RE.sub("", line).strip()
+            spinner_words = {"thinking", "loading", "waiting", "processing", "working"}
+            if not without_braille or without_braille.lower().rstrip(".") in spinner_words:
+                continue  # Pure spinner line — drop entirely
+            # Otherwise keep the line as-is (real content with incidental braille)
+        out_lines.append(line)
     return "\n".join(out_lines)
 
 
@@ -344,7 +348,9 @@ _TRUST_WARNING_RE = re.compile(
 # Credits/time footer: Credits: 0.15 • Time: 11s (with possible unicode chars)
 _CREDITS_RE = re.compile(r"^.*Credits:.*Time:.*$", re.MULTILINE)
 
-# Tool invocation lines — comprehensive patterns for kiro-cli output
+# Tool invocation lines — patterns for CLI tool-call noise (not spinners).
+# NOTE: spinner/Thinking/ellipsis patterns are handled by strip_streaming_noise()
+# which runs BEFORE this regex in extract_final_response(). Don't duplicate them here.
 _TOOL_LINE_PATTERNS = [
     r"Reading (?:directory|file):.*",
     r"Writing (?:file|to):.*",
@@ -362,11 +368,6 @@ _TOOL_LINE_PATTERNS = [
     r"Successfully (?:read|wrote|created|deleted|updated|executed).*",
     r"Found \d+ (?:results?|files?|matches?).*",
     r"- Completed in [\d.]+s.*",
-    r"Thinking\.{2,}",
-    r"[\u2800-\u28FF]+\s*(?:Thinking|Loading|Waiting|Processing|Working)?\.{0,}",
-    r"[\u2800-\u28FF]+",  # bare braille spinner chars
-    r"\.{3,}\s*",  # Bare ellipsis (thinking indicator)
-    r"\u2026+\s*",  # Unicode ellipsis char …
     r"\(using tool:.*\)",
 ]
 
@@ -469,3 +470,61 @@ def format_output(text: str, is_error: bool = False) -> str:
     if is_error:
         return f"❌ <b>Error:</b>\n\n{text}"
     return text.strip()
+
+
+# ── Screenshot Detection (Story 5.1) ─────────────────────────────
+
+# URLs we must NOT treat as local file paths — strip these before detection.
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+
+# Absolute paths: must start with `/`
+# Relative paths: must start with `./`
+# Supported extensions: png, jpg, jpeg, gif, webp (case-insensitive)
+# Path characters: exclude whitespace and common string delimiters that
+# would end a path token in CLI output.
+_SCREENSHOT_PATTERN = re.compile(
+    r"""
+    (?<![A-Za-z0-9])  # not preceded by alphanumeric (avoids partial matches inside words)
+    (
+        /[^\s'"<>|()\[\]]+\.(?:png|jpg|jpeg|gif|webp)    # absolute path
+        |
+        \.\/[^\s'"<>|()\[\]]+\.(?:png|jpg|jpeg|gif|webp) # relative ./path
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def detect_screenshots(text: str) -> list[str]:
+    """Extract image file paths from CLI output text.
+
+    Scans for absolute paths (starting with `/`) or relative paths
+    (starting with `./`) ending in supported image extensions:
+    ``.png``, ``.jpg``, ``.jpeg``, ``.gif``, ``.webp``.
+
+    URLs (``http://`` / ``https://``) are explicitly excluded.
+
+    Args:
+        text: Raw CLI output text (ANSI sequences will be stripped).
+
+    Returns:
+        List of detected file path strings in order of first appearance.
+        Duplicates are removed. Empty list if no image paths found.
+    """
+    if not text:
+        return []
+
+    # Strip ANSI sequences — paths may be embedded in color codes.
+    cleaned = strip_ansi(text)
+
+    # Remove URLs first so their path components are not misread as local files.
+    cleaned = _URL_PATTERN.sub(" ", cleaned)
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for match in _SCREENSHOT_PATTERN.finditer(cleaned):
+        path = match.group(1)
+        if path not in seen:
+            seen.add(path)
+            ordered.append(path)
+    return ordered

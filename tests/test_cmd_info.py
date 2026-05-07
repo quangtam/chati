@@ -14,32 +14,6 @@ from session_manager import PtySession, PtyState
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(autouse=True)
-def patch_allowed_users():
-    """Allow test user IDs through auth decorator."""
-    import chati
-    original = chati.config
-
-    class _ConfigShim:
-        def __init__(self, orig):
-            self._orig = orig
-            self.allowed_user_ids = frozenset({123456789, 999, 888})
-
-        def __getattr__(self, name):
-            return getattr(self._orig, name)
-
-    chati.config = _ConfigShim(original)
-    yield
-    chati.config = original
-
-
-@pytest.fixture
-def temp_db_path():
-    """Provide a temporary DB file path, cleaned up after test."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield os.path.join(tmpdir, "test_chati.db")
-
-
 @pytest.fixture
 def mock_context():
     """Plain Telegram context with user_data dict (AsyncMock bot_data)."""
@@ -47,23 +21,6 @@ def mock_context():
     ctx.user_data = {}
     ctx.bot_data = {}
     return ctx
-
-
-@pytest.fixture
-def telegram_update_factory(telegram_update_factory):
-    """Extend conftest factory to also wire reply_chat_action as AsyncMock.
-
-    /info uses reply_chat_action(ChatAction.TYPING), which the base factory
-    leaves as a regular MagicMock (not awaitable).
-    """
-    base = telegram_update_factory
-
-    def _make(**kwargs):
-        update = base(**kwargs)
-        update.message.reply_chat_action = AsyncMock()
-        return update
-
-    return _make
 
 
 def _make_session(

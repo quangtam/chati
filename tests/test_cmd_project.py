@@ -9,30 +9,6 @@ import pytest
 from db import DEFAULT_THREAD_ID, get_thread_config, init_db
 
 
-@pytest.fixture(autouse=True)
-def patch_allowed_users():
-    """Allow test user IDs through auth decorator."""
-    import chati
-    original = chati.config
-    # Create a mutable shim — config is frozen dataclass, so replace the whole object
-    class _ConfigShim:
-        def __init__(self, orig):
-            self._orig = orig
-            self.allowed_user_ids = frozenset({123456789, 999, 888})
-        def __getattr__(self, name):
-            return getattr(self._orig, name)
-    chati.config = _ConfigShim(original)
-    yield
-    chati.config = original
-
-
-@pytest.fixture
-def temp_db_path():
-    """Provide a temporary DB file path, cleaned up after test."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield os.path.join(tmpdir, "test_chati.db")
-
-
 @pytest.fixture
 def valid_project_dir():
     """Provide a real directory path for valid-path tests."""

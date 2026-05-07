@@ -1,6 +1,6 @@
 # Story 2.8: Strip Spinner/Thinking Noise from Streaming Preview (Bug)
 
-Status: review
+Status: done
 
 ## Story
 
@@ -135,3 +135,18 @@ Claude Opus 4.7 via Kiro
 |------------|----------------------------------------------------|
 | 2026-05-07 | Story opened to fix Thinking/spinner noise in preview. |
 | 2026-05-07 | strip_streaming_noise + CR collapsing + enhanced final-output filter. 23 tests. Full suite 201/201. |
+
+
+### Review Findings
+
+Code review (2026-05-07).
+
+**Patch — MEDIUM:**
+
+- [ ] [Review][Patch] `_SPINNER_LINE_RE` ASCII-prefix pattern `[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)\.{0,}` with `\.{0,}` is equivalent to no trailing-dot requirement — matches real bullet like `- Loading config`. Change to `\.{2,}` (require at least 2 dots, matches spinner-style "...") or drop `\.{0,}` and require end anchor to avoid false-positives. [message_utils.py:_SPINNER_LINE_RE]
+- [ ] [Review][Patch] Cross-chunk CR collapse impossible: `execute_stream` yields chunks already split at `\n`. Spinner frames straddling 2 chunks escape filtering. Either buffer across chunks or document limitation. [message_utils.py:strip_streaming_noise, chati.py streaming loops]
+- [ ] [Review][Patch] Embedded braille-in-line stripping is too aggressive: silently drops legit Unicode braille content (e.g. accessibility docs, Japanese/Korean mockups). Consider only stripping when line also matches spinner grammar. [message_utils.py:strip_streaming_noise]
+
+**Patch — LOW:**
+
+- [x] [Review][Patch] Consolidated `_TOOL_LINE_PATTERNS`: removed braille/Thinking/ellipsis duplicates that `strip_streaming_noise()` already handles upstream. No redundant regex sweeps on large outputs. [message_utils.py:_TOOL_LINE_PATTERNS] — **fixed in tech-debt sweep 2026-05-07**

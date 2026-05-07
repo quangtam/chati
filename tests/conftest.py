@@ -1,17 +1,21 @@
 """Shared test fixtures for Chati v2.0 TDD workflow.
 
-Provides 5 core fixtures:
+Provides fixtures:
 - in_memory_db: Migrated SQLite :memory: for DB tests
 - mock_provider: Configurable mock CliProvider
 - pty_process: Real PTY with cat, force-kill cleanup
 - session_context: Seeded thread_config data
 - telegram_update_factory: Factory for fake Telegram Update objects
+- patch_allowed_users: Auto-applied auth bypass for test user IDs
+- clean_state: Auto-applied per-thread task/session/counter reset
+- temp_db_path: Fresh SQLite file per test
 """
 
 import asyncio
 import os
 import pty as pty_module
 import signal
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -24,6 +28,67 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from cli_providers.base import CliProvider, CliProviderConfig
+
+
+# ─── Auth bypass (auto-applied) ──────────────────────────────────────────────
+
+
+class _ConfigShim:
+    """Test-only shim that exposes a wider allowed_user_ids frozenset.
+
+    The real Config is a frozen dataclass (immutable). We swap the whole
+    chati.config object for this shim during tests so the @authorized
+    decorator accepts our fake test user IDs.
+    """
+
+    def __init__(self, orig):
+        self._orig = orig
+        self.allowed_user_ids = frozenset({123456789, 999, 888})
+
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+
+
+@pytest.fixture(autouse=True)
+def patch_allowed_users():
+    """Allow test user IDs through the @authorized decorator. Auto-applied."""
+    import chati
+    original = chati.config
+    chati.config = _ConfigShim(original)
+    yield
+    chati.config = original
+
+
+# ─── Runtime state cleanup (auto-applied) ────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def clean_state():
+    """Reset per-thread task/session/counter dicts between tests.
+
+    Auto-applied because every test that touches chati handlers can
+    accidentally leak state into the next test via module-level dicts.
+    """
+    import chati
+    # Save pre-test state (defensive — shouldn't normally have any)
+    chati._thread_tasks.clear()
+    chati._thread_sessions.clear()
+    chati.runner._session_mgr._sessions.clear()
+    yield
+    # Always clean up after test
+    chati._thread_tasks.clear()
+    chati._thread_sessions.clear()
+    chati.runner._session_mgr._sessions.clear()
+
+
+# ─── Temp SQLite path ────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def temp_db_path():
+    """Fresh on-disk SQLite path, cleaned up after the test."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield os.path.join(tmpdir, "test_chati.db")
 
 
 # ─── in_memory_db ────────────────────────────────────────────────────────────
@@ -142,7 +207,12 @@ async def session_context(in_memory_db):
 
 @pytest.fixture
 def telegram_update_factory():
-    """Factory for fake Telegram Update objects."""
+    """Factory for fake Telegram Update objects.
+
+    All async Telegram methods likely called by handlers are pre-wired as
+    AsyncMock so tests can `await update.message.reply_chat_action(...)`
+    or `await update.message.reply_text(...)` without extra setup.
+    """
     def _create(
         user_id=123456789,
         chat_id=123456789,
@@ -157,7 +227,9 @@ def telegram_update_factory():
         update.message = MagicMock()
         update.message.text = text
         update.message.message_thread_id = message_thread_id
+        # Pre-wire all async Telegram methods handlers might call
         update.message.reply_text = AsyncMock()
+        update.message.reply_chat_action = AsyncMock()
         return update
 
     return _create

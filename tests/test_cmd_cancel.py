@@ -17,51 +17,6 @@ import pytest
 from session_manager import PtySession, PtyState
 
 
-@pytest.fixture(autouse=True)
-def patch_allowed_users():
-    """Allow test user IDs through auth decorator."""
-    import chati
-    original = chati.config
-
-    class _ConfigShim:
-        def __init__(self, orig):
-            self._orig = orig
-            self.allowed_user_ids = frozenset({123456789, 999, 888})
-
-        def __getattr__(self, name):
-            return getattr(self._orig, name)
-
-    chati.config = _ConfigShim(original)
-    yield
-    chati.config = original
-
-
-@pytest.fixture(autouse=True)
-def clean_state():
-    """Reset per-thread task/session counters between tests."""
-    import chati
-    chati._thread_tasks.clear()
-    chati._thread_sessions.clear()
-    chati.runner._session_mgr._sessions.clear()
-    yield
-    chati._thread_tasks.clear()
-    chati._thread_sessions.clear()
-    chati.runner._session_mgr._sessions.clear()
-
-
-@pytest.fixture
-def telegram_update_factory(telegram_update_factory):
-    """Wrap factory to add awaitable reply_chat_action."""
-    base = telegram_update_factory
-
-    def _make(**kwargs):
-        update = base(**kwargs)
-        update.message.reply_chat_action = AsyncMock()
-        return update
-
-    return _make
-
-
 class TestCmdCancel:
     """Tests for /cancel handler."""
 

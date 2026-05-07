@@ -13,46 +13,6 @@ import pytest
 from db import DEFAULT_THREAD_ID, init_db, upsert_thread_config
 
 
-@pytest.fixture(autouse=True)
-def patch_allowed_users():
-    """Allow test user IDs through auth decorator."""
-    import chati
-    original = chati.config
-
-    class _ConfigShim:
-        def __init__(self, orig):
-            self._orig = orig
-            self.allowed_user_ids = frozenset({123456789, 999, 888})
-
-        def __getattr__(self, name):
-            return getattr(self._orig, name)
-
-    chati.config = _ConfigShim(original)
-    yield
-    chati.config = original
-
-
-@pytest.fixture
-def temp_db_path():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield os.path.join(tmpdir, "bind.db")
-
-
-@pytest.fixture
-def telegram_update_factory(telegram_update_factory):
-    """Wrap conftest factory to add awaitable reply_chat_action."""
-    base = telegram_update_factory
-
-    def _make(**kwargs):
-        update = base(**kwargs)
-        update.message.reply_chat_action = AsyncMock()
-        update.message.reply_text = AsyncMock()
-        update.effective_chat.id = kwargs.get("chat_id", 123456789)
-        return update
-
-    return _make
-
-
 # ─── Direct CliRunner tests: cwd propagation ────────────────────────────────
 
 
@@ -66,8 +26,6 @@ class TestExecuteStreamCwdPropagation:
         # Capture what cwd _spawn_pty is called with
         captured: dict = {}
 
-        original_spawn = CliRunner._spawn_pty
-
         def _fake_spawn(args, env, cwd):
             captured["args"] = args
             captured["cwd"] = cwd
@@ -75,22 +33,22 @@ class TestExecuteStreamCwdPropagation:
             raise RuntimeError("stop after cwd capture")
 
         import chati
-        with patch.object(CliRunner, "_spawn_pty", staticmethod(_fake_spawn)):
-            # Empty session pool so _get_or_create_session calls spawn
+        with tempfile.TemporaryDirectory() as real_dir, patch.object(
+            CliRunner, "_spawn_pty", staticmethod(_fake_spawn)
+        ):
             chati.runner._session_mgr._sessions.clear()
             try:
                 gen = chati.runner.execute_stream(
                     "hello",
                     thread_id=111,
-                    project_dir="/tmp/project-AAA",
+                    project_dir=real_dir,
                 )
-                # Drain the generator until it hits our RuntimeError
                 async for _ in gen:
                     pass
             except RuntimeError:
                 pass  # expected from _fake_spawn
 
-        assert captured.get("cwd") == "/tmp/project-AAA"
+            assert captured.get("cwd") == real_dir
 
     async def test_interactive_spawn_falls_back_to_env_default(self):
         """execute_stream(project_dir=None) → cwd = config.project_dir."""
@@ -138,7 +96,7 @@ class TestExecuteStreamCwdPropagation:
 
         import chati
         # Force the non-interactive path by making build_interactive_args return None
-        with patch.object(
+        with tempfile.TemporaryDirectory() as real_dir, patch.object(
             chati.runner._provider.__class__,
             "build_interactive_args",
             lambda self, model=None: None,
@@ -150,12 +108,38 @@ class TestExecuteStreamCwdPropagation:
             gen = chati.runner.execute_stream(
                 "hi",
                 thread_id=333,
-                project_dir="/tmp/project-BBB",
+                project_dir=real_dir,
             )
             async for _ in gen:
                 pass
 
-        assert captured.get("cwd") == "/tmp/project-BBB"
+            assert captured.get("cwd") == real_dir
+
+    async def test_spawn_rejected_when_cwd_does_not_exist(self):
+        """Non-existent cwd → spawn returns None early (no PTY started)."""
+        from cli_runner import CliRunner
+
+        import chati
+        spawn_called = False
+
+        def _fake_spawn(args, env, cwd):
+            nonlocal spawn_called
+            spawn_called = True
+            return (99999, 99)
+
+        with patch.object(CliRunner, "_spawn_pty", staticmethod(_fake_spawn)):
+            chati.runner._session_mgr._sessions.clear()
+            # Path that definitely doesn't exist
+            bogus = "/tmp/definitely-not-a-real-dir-" + os.urandom(4).hex()
+
+            gen = chati.runner.execute_stream(
+                "hi", thread_id=444, project_dir=bogus,
+            )
+            async for _ in gen:
+                pass
+
+        # isdir() guard should have prevented the spawn
+        assert not spawn_called, "spawn must be blocked when cwd is invalid"
 
 
 # ─── End-to-end: handle_message uses resolved project_dir ───────────────────

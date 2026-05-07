@@ -118,11 +118,24 @@ class CliRunner:
 
         Args:
             project_dir: Per-thread working directory for new sessions.
-                If None, falls back to self._config.project_dir (.env default).
+                If None or empty, falls back to self._config.project_dir (.env default).
                 Existing sessions reuse their original spawn cwd regardless.
+
+        Returns:
+            PtySession on success, None if cwd is invalid (non-existent dir)
+            or session limit exceeded.
         """
         session = self._session_mgr.get(thread_id)
         if session and session.alive:
+            # Warn if bound project_dir differs from session's spawn cwd
+            effective_cwd = project_dir if project_dir else self._config.project_dir
+            session_cwd = getattr(session, "_spawn_cwd", None)
+            if session_cwd and session_cwd != effective_cwd:
+                logger.info(
+                    "[SessionManager] session reuse [thread=%s]: bound project_dir=%s "
+                    "differs from session spawn cwd=%s — use /new to switch",
+                    thread_id, effective_cwd, session_cwd,
+                )
             return session
 
         # Clean up dead session
@@ -134,12 +147,22 @@ class CliRunner:
             return None
 
         env = self._env
-        cwd = project_dir or self._config.project_dir
+        cwd = project_dir if project_dir else self._config.project_dir
 
+        # Validate cwd before forking — prevents silent child-process crashes
+        # from os.chdir() failures that cause the parent to hang until timeout.
+        if not os.path.isdir(cwd):
+            logger.error(
+                "[SessionManager] spawn failed [thread=%s]: cwd does not exist: %s",
+                thread_id, cwd,
+            )
+            return None
+
+        # Cwd logged at DEBUG (may contain user paths) — user actions at INFO
         logger.info(
-            "Spawning PTY session [thread=%s, cwd=%s]: %s",
-            thread_id, cwd, " ".join(args),
+            "Spawning PTY session [thread=%s]: %s", thread_id, " ".join(args),
         )
+        logger.debug("[SessionManager] spawn cwd [thread=%s]: %s", thread_id, cwd)
 
         # Spawn in a thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()
@@ -149,6 +172,7 @@ class CliRunner:
 
         try:
             session = self._session_mgr.create(thread_id, pid, fd)
+            session._spawn_cwd = cwd  # Track for mismatch detection on reuse
         except SessionLimitExceeded:
             # Clean up the spawned process we can't use
             try:
@@ -648,11 +672,19 @@ class CliRunner:
             project_dir: Per-thread cwd. If None, falls back to config.project_dir.
         """
         args = self._provider.build_args(prompt, model=model, resume=resume)
-        cwd = project_dir or self._config.project_dir
-        logger.info(
-            "Non-interactive [thread=%s, cwd=%s]: %s",
-            thread_id, cwd, " ".join(args),
-        )
+        cwd = project_dir if project_dir else self._config.project_dir
+
+        # Validate cwd before spawn
+        if not os.path.isdir(cwd):
+            logger.error(
+                "[Non-interactive] spawn failed [thread=%s]: cwd does not exist: %s",
+                thread_id, cwd,
+            )
+            yield f"❌ Project directory does not exist: {cwd}\n"
+            return
+
+        logger.info("Non-interactive [thread=%s]: %s", thread_id, " ".join(args))
+        logger.debug("[Non-interactive] spawn cwd [thread=%s]: %s", thread_id, cwd)
 
         try:
             process = await asyncio.create_subprocess_exec(

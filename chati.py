@@ -17,7 +17,7 @@ import re
 import time
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
@@ -31,7 +31,7 @@ from telegram.ext import (
 from config import Config
 from cli_runner import CliRunner
 from cli_providers import get_available_providers
-from message_utils import format_output, split_message, strip_ansi, extract_final_response, strip_streaming_noise
+from message_utils import format_output, split_message, strip_ansi, extract_final_response, strip_streaming_noise, detect_screenshots
 from session_manager import DecisionPrompt, PtyState, SessionManager
 import db
 from db import DEFAULT_THREAD_ID, DB_PATH
@@ -145,33 +145,39 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 @authorized
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command."""
+    """Handle /help — show all available v2 commands."""
+    provider_name = runner.provider.name
     model = context.user_data.get("model", "auto")
+
     await update.message.reply_text(
-        "📖 <b>Hướng dẫn sử dụng</b>\n\n"
-        "<b>Chat tự do:</b>\n"
-        "Gõ bất kỳ câu hỏi/yêu cầu → CLI xử lý\n\n"
-        "<b>Thread = Session:</b>\n"
-        "• Tin nhắn đầu tiên trong thread → session mới\n"
-        "• Tin nhắn tiếp theo → tự động resume session\n"
-        "• /new trong thread → reset session\n"
-        "• Ngoài thread → mỗi tin nhắn cũng resume\n\n"
-        "<b>Model:</b>\n"
-        "/model — Chọn AI model (inline keyboard)\n"
-        f"Đang dùng: <code>{model}</code>\n\n"
-        "<b>BMAD Workflow:</b>\n"
-        "<code>/bmad-create-prd</code> — Tạo PRD\n"
-        "<code>/bmad-create-architecture</code> — Thiết kế architecture\n"
-        "<code>/bmad-sprint-planning</code> — Sprint planning\n"
-        "<code>/bmad-dev-story</code> — Implement story\n"
-        "<code>/bmad-code-review</code> — Code review\n\n"
-        "<b>Quản lý:</b>\n"
-        "/status — Kiểm tra CLI\n"
-        "/cancel — Hủy lệnh đang chạy\n"
-        "/new — Tạo session mới\n"
-        "/resume — Resume session trước\n\n"
-        f"<b>Project:</b> <code>{Path(config.project_dir).name}</code>\n"
-        f"<b>Timeout:</b> {config.cli_timeout}s",
+        "📖 <b>Chati v2.0 — Command Reference</b>\n\n"
+
+        "<b>💬 Chat:</b>\n"
+        "Send any message → forwarded to CLI\n"
+        "Reply to decision prompt → piped to CLI\n\n"
+
+        "<b>🔧 Session:</b>\n"
+        "/start — Welcome message\n"
+        "/new — Start fresh session (kills current)\n"
+        "/cancel — Kill running process\n"
+        "/resume — Resume previous session\n"
+        "/info — Current session details\n"
+        "/sessions — All active sessions\n\n"
+
+        "<b>⚙️ Configuration:</b>\n"
+        "/project &lt;path&gt; — Bind thread to project\n"
+        "/projects — Browse previous projects\n"
+        "/provider &lt;name&gt; — Switch CLI provider\n"
+        "/model — Select AI model\n\n"
+
+        "<b>📊 Status:</b>\n"
+        "/status — CLI health check\n"
+        "/skills — List BMAD workflows\n"
+        "/help — This message\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 Provider: <code>{_escape_html(provider_name)}</code>\n"
+        f"🤖 Model: <code>{_escape_html(model)}</code>",
         parse_mode=ParseMode.HTML,
     )
 
@@ -307,24 +313,73 @@ async def cmd_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 @authorized
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /status — check CLI availability."""
-    await update.message.reply_chat_action(ChatAction.TYPING)
-    model = context.user_data.get("model", "auto")
-    thread_id = _get_thread_id(update)
-    thread_count = _thread_sessions.get(thread_id, 0)
+    """Handle /status — check CLI availability and session health.
 
-    status = await runner.check_status()
-    status += f"\n\n🤖 Model: {model}"
-    status += f"\n💬 Thread messages: {thread_count}"
-    await update.message.reply_text(status)
+    Shows: CLI binary status, auth check, session pool stats,
+    current thread state, model, project, timeout.
+    """
+    await update.message.reply_chat_action(ChatAction.TYPING)
+
+    thread_id = _get_thread_id(update)
+    model = context.user_data.get("model", "auto")
+
+    # CLI health check (shells out — expected for /status)
+    cli_status = await runner.check_status()
+
+    # Session stats
+    active = runner._session_mgr.active_count()
+    max_s = runner._session_mgr.max_sessions
+
+    # Current thread state
+    thread_state = runner._session_mgr.get_state(thread_id)
+    if thread_state:
+        emoji = SessionManager.get_status_emoji(thread_state)
+        thread_info = f"{emoji} {thread_state.value}"
+    else:
+        thread_info = "No session"
+
+    # Thread config (best-effort)
+    try:
+        thread_config = await db.get_thread_config(
+            thread_id if thread_id is not None else DEFAULT_THREAD_ID, path=DB_PATH
+        )
+    except Exception:
+        thread_config = None
+
+    project_name = (
+        Path(thread_config.project_dir).name
+        if thread_config and thread_config.project_dir
+        else Path(config.project_dir).name
+    )
+    timeout = (
+        thread_config.timeout_seconds
+        if thread_config and thread_config.timeout_seconds
+        else config.cli_timeout
+    )
+
+    lines = [
+        "🔍 <b>CLI Status</b>\n",
+        _escape_html(cli_status),
+        f"\n⚡ Sessions: {active}/{max_s} active",
+        f"🧵 This thread: {thread_info}",
+        f"\n🤖 Model: <code>{_escape_html(model)}</code>",
+        f"📁 Project: <code>{_escape_html(project_name)}</code>",
+        f"⏱️ Timeout: {timeout}s",
+    ]
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 def _format_duration(seconds: float) -> str:
     """Format elapsed seconds as human-readable duration.
 
     Examples: 45s → "45s", 3660s → "1h 1m", 125s → "2m 5s"
+    Clamps negative values to 0 (logs warning for debugging).
     """
-    total = int(seconds) if seconds > 0 else 0
+    if seconds < 0:
+        logger.debug("[_format_duration] negative seconds=%.2f, clamping to 0", seconds)
+        seconds = 0
+    total = int(seconds)
     if total < 60:
         return f"{total}s"
     hours, remainder = divmod(total, 3600)
@@ -334,20 +389,110 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}m {secs}s"
 
 
+def _render_info_no_session(
+    project_name: str,
+    project_dir: str,
+    provider_name: str,
+    thread_provider: str,
+    model: str,
+    timeout_s: int,
+    thread_label: str,
+    active_total: int,
+    max_slots: int,
+    cli_path: str,
+) -> str:
+    """Render /info output when no active session exists."""
+    esc = _escape_html
+    lines = [
+        f"📁 <b>{esc(project_name)}</b>",
+        f"   <code>{esc(project_dir)}</code>",
+        "",
+        "💤 <b>No active session</b>",
+        "",
+        f"📡 {esc(provider_name)} (<code>{esc(thread_provider)}</code>)  |  🤖 <code>{esc(model)}</code>",
+        f"👤 Logged-in: <i>see /status</i>",
+        "",
+        "<i>Send a message to start a session.</i>",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🧵 Thread: <code>{esc(thread_label)}</code>  |  "
+        f"⚙️ Timeout: {timeout_s}s  |  "
+        f"⚡ Pool: {active_total}/{max_slots}",
+        f"🛠 Binary: <code>{esc(cli_path)}</code>",
+    ]
+    return "\n".join(lines)
+
+
+def _render_info_active(
+    project_name: str,
+    project_dir: str,
+    provider_name: str,
+    thread_provider: str,
+    model: str,
+    status_emoji: str,
+    state_name: str,
+    ready_mark: str,
+    duration: str,
+    idle_for: str,
+    msg_count: int,
+    usage_text: str,
+    timeout_s: int,
+    thread_label: str,
+    active_total: int,
+    max_slots: int,
+    pid: int,
+    cli_path: str,
+    pending_decision_remaining: str | None,
+) -> str:
+    """Render /info output when an active session exists."""
+    esc = _escape_html
+    lines = [
+        # 1. Project — top priority, bold
+        f"📁 <b>{esc(project_name)}</b>",
+        f"   <code>{esc(project_dir)}</code>",
+        "",
+        # 2. Status — what's happening right now
+        f"{status_emoji} <b>{esc(state_name)}</b>  ({ready_mark})",
+    ]
+
+    # 3. Pending-decision alert — if applicable, right after status
+    if pending_decision_remaining is not None:
+        lines.append(
+            f"⚠️ <b>Waiting for your reply</b> — expires in {pending_decision_remaining}"
+        )
+
+    lines.extend([
+        "",
+        # 4. Provider + model — who you're talking to
+        f"📡 {esc(provider_name)} (<code>{esc(thread_provider)}</code>)  |  🤖 <code>{esc(model)}</code>",
+        f"👤 Logged-in: <i>see /status</i>",
+        "",
+        # 5. Session usage — duration, activity, messages
+        f"⏱️ Duration: <b>{duration}</b>  (last activity: {idle_for} ago)",
+        f"💬 Messages: <b>{msg_count}</b>",
+        f"💳 Usage: {esc(usage_text)}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        # 6. Technical details — debug row
+        f"🧵 Thread: <code>{esc(thread_label)}</code>  |  "
+        f"⚙️ Timeout: {timeout_s}s  |  "
+        f"⚡ Pool: {active_total}/{max_slots}",
+        f"🔢 PID: <code>{pid}</code>  |  "
+        f"🛠 Binary: <code>{esc(cli_path)}</code>",
+    ])
+
+    return "\n".join(lines)
+
+
 @authorized
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /info — show current session details (read-only).
 
-    Layout prioritizes what users care most on mobile:
-      1. Project (bold, top — "where am I working")
-      2. Status (emoji + state)
-      3. Pending-decision alert (if any)
-      4. Provider + model
-      5. Duration / last activity / messages
-      6. Technical details (thread, timeout, PID, binary, pool, usage)
-
     Never shells out to CLI (must be instant). Never mutates session state.
     """
+    if update.message is None:
+        return
+
     await update.message.reply_chat_action(ChatAction.TYPING)
 
     thread_id = _get_thread_id(update)
@@ -363,13 +508,17 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     provider = runner.provider
     provider_name = provider.name
     cli_path = provider.config.cli_path
-    user_model = context.user_data.get("model")
-    model = (thread_config.model if thread_config and thread_config.model else None) or user_model or "default"
+    # Model resolution: thread_config.model → user_data → "default"
+    model = (
+        (thread_config.model if thread_config and thread_config.model else None)
+        or context.user_data.get("model")
+        or "default"
+    )
     project_dir = (thread_config.project_dir if thread_config else None) or config.project_dir
     project_name = Path(project_dir).name if project_dir else "—"
     timeout_s = (
         thread_config.timeout_seconds
-        if thread_config and thread_config.timeout_seconds
+        if thread_config and thread_config.timeout_seconds is not None and thread_config.timeout_seconds > 0
         else config.cli_timeout
     )
     thread_provider = (
@@ -387,23 +536,19 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # ── Branch A: no active session ──────────────────────────────
     if session is None or session.state == PtyState.DEAD:
-        lines = [
-            f"📁 <b>{project_name}</b>",
-            f"   <code>{project_dir}</code>",
-            "",
-            "💤 <b>No active session</b>",
-            "",
-            f"📡 {provider_name}  |  🤖 <code>{model}</code>",
-            "",
-            "<i>Send a message to start a session.</i>",
-            "",
-            "━━━━━━━━━━━━━━━━━━━━",
-            f"🧵 Thread: <code>{thread_label}</code>  |  "
-            f"⚙️ Timeout: {timeout_s}s  |  "
-            f"⚡ Pool: {active_total}/{max_slots}",
-            f"🛠 Binary: <code>{cli_path}</code>",
-        ]
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        text = _render_info_no_session(
+            project_name=project_name,
+            project_dir=project_dir,
+            provider_name=provider_name,
+            thread_provider=thread_provider,
+            model=model,
+            timeout_s=timeout_s,
+            thread_label=thread_label,
+            active_total=active_total,
+            max_slots=max_slots,
+            cli_path=cli_path,
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
         return
 
     # ── Branch B: active session ─────────────────────────────────
@@ -414,60 +559,171 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     status_emoji = SessionManager.get_status_emoji(session.state)
     state_name = session.state.value
     ready_mark = "ready" if session.ready else "warming up"
-    usage_text = provider.parse_usage_output("") or "not available"
+    usage_text = provider.parse_usage_output("") or "Usage data not available for this provider"
 
-    lines = [
-        # 1. Project — top priority, bold
-        f"📁 <b>{project_name}</b>",
-        f"   <code>{project_dir}</code>",
-        "",
-        # 2. Status — what's happening right now
-        f"{status_emoji} <b>{state_name}</b>  ({ready_mark})",
-    ]
-
-    # 3. Pending-decision alert — if applicable, right after status
+    pending_remaining: str | None = None
     if session.state == PtyState.WAITING_FOR_USER:
         elapsed = now - session.last_active_at
         remaining = max(0, config.decision_reply_timeout - int(elapsed))
-        lines.append(
-            f"⚠️ <b>Waiting for your reply</b> — expires in {_format_duration(remaining)}"
+        pending_remaining = _format_duration(remaining)
+
+    text = _render_info_active(
+        project_name=project_name,
+        project_dir=project_dir,
+        provider_name=provider_name,
+        thread_provider=thread_provider,
+        model=model,
+        status_emoji=status_emoji,
+        state_name=state_name,
+        ready_mark=ready_mark,
+        duration=duration,
+        idle_for=idle_for,
+        msg_count=msg_count,
+        usage_text=usage_text,
+        timeout_s=timeout_s,
+        thread_label=thread_label,
+        active_total=active_total,
+        max_slots=max_slots,
+        pid=session.pid,
+        cli_path=cli_path,
+        pending_decision_remaining=pending_remaining,
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+@authorized
+async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /sessions — list ALL active sessions across threads (read-only).
+
+    Reads from SessionManager pool (memory) + SQLite thread_config (single
+    batch query). Never shells out, never mutates session state. Paginates
+    at 10 sessions. Filters out DEAD sessions from the display list.
+    Sorted by thread_id for stable pagination.
+    """
+    if update.message is None:
+        return
+
+    await update.message.reply_chat_action(ChatAction.TYPING)
+
+    session_mgr = runner._session_mgr
+    sessions = session_mgr.list_all()
+    max_slots = session_mgr.max_sessions
+    active_total = session_mgr.active_count()
+
+    # Filter out DEAD sessions — only show actionable ones
+    live_sessions = {
+        tid: s for tid, s in sessions.items() if s.state != PtyState.DEAD
+    }
+
+    # ── Branch A: no live sessions ───────────────────────────────
+    if not live_sessions:
+        await update.message.reply_text(
+            "📋 <b>No active sessions.</b>\n\n"
+            "<i>Send a message in any thread to start one.</i>\n"
+            f"Slots available: {max_slots}/{max_slots}",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # ── Branch B: list sessions (paginated at 10) ────────────────
+    # Sort by thread_id for stable pagination (None → main chat first)
+    items = sorted(
+        live_sessions.items(),
+        key=lambda x: (x[0] is not None, x[0] if x[0] is not None else -1),
+    )
+    page_size = 10
+    display_items = items[:page_size]
+
+    # Batch-load thread configs once (fixes N+1 query pattern)
+    try:
+        all_configs = await db.list_all_threads(path=DB_PATH)
+        config_by_tid = {cfg.thread_id: cfg for cfg in all_configs}
+    except Exception as exc:
+        logger.warning("[cmd_sessions] list_all_threads failed: %s", exc)
+        config_by_tid = {}
+
+    provider_name = runner.provider.name
+    now = time.monotonic()
+
+    lines: list[str] = [
+        f"📋 <b>Active Sessions</b>  ({active_total}/{max_slots} slots)",
+        "",
+    ]
+
+    for tid, session in display_items:
+        lookup_id = tid if tid is not None else DEFAULT_THREAD_ID
+        thread_config = config_by_tid.get(lookup_id)
+
+        project = (
+            Path(thread_config.project_dir).name
+            if thread_config and thread_config.project_dir
+            else "—"
+        )
+        model = (
+            thread_config.model
+            if thread_config and thread_config.model
+            else "default"
+        )
+        thread_provider = (
+            thread_config.cli_provider
+            if thread_config and thread_config.cli_provider
+            else provider_name
         )
 
-    lines.extend([
-        "",
-        # 4. Provider + model — who you're talking to
-        f"📡 {provider_name}  |  🤖 <code>{model}</code>",
-        "",
-        # 5. Session usage — duration, activity, messages
-        f"⏱️ Duration: <b>{duration}</b>  (last activity: {idle_for} ago)",
-        f"💬 Messages: <b>{msg_count}</b>",
-        f"💳 Usage: {usage_text}",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━",
-        # 6. Technical details — debug row
-        f"🧵 Thread: <code>{thread_label}</code>  |  "
-        f"⚙️ Timeout: {timeout_s}s  |  "
-        f"⚡ Pool: {active_total}/{max_slots}",
-        f"🔢 PID: <code>{session.pid}</code>  |  "
-        f"🛠 Binary: <code>{cli_path}</code>",
-    ])
+        emoji = SessionManager.get_status_emoji(session.state)
+        thread_label = str(tid) if tid is not None else "main"
+        duration = _format_duration(now - session.created_at)
+        msg_count = _thread_sessions.get(tid, 0)
 
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        lines.append(f"{emoji} <b>Thread {_escape_html(thread_label)}</b>")
+        lines.append(
+            f"   📁 {_escape_html(project)}  |  "
+            f"📡 {_escape_html(thread_provider)}  |  "
+            f"🤖 <code>{_escape_html(str(model))}</code>"
+        )
+
+        # State-specific third line
+        if session.state == PtyState.WAITING_FOR_USER:
+            lines.append(f"   ⏱️ {duration}  |  ⚠️ Waiting for input")
+        elif session.state == PtyState.IDLE:
+            lines.append(f"   ⏱️ {duration}  |  Idle")
+        else:
+            lines.append(f"   ⏱️ {duration}  |  💬 {msg_count} messages")
+        lines.append("")
+
+    remaining = len(items) - len(display_items)
+    if remaining > 0:
+        lines.append(f"... and {remaining} more")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        f"Slots: {active_total}/{max_slots}  |  "
+        "/cancel &lt;thread&gt; to free"
+    )
+
+    # Guard against Telegram 4096-char limit
+    output = "\n".join(lines)
+    if len(output) <= MAX_MSG_LEN:
+        await update.message.reply_text(output, parse_mode=ParseMode.HTML)
+    else:
+        for chunk in split_message(output):
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
 
 
 @authorized
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /cancel — kill running CLI process for this thread.
 
-    Three things happen:
-    1. Pending decision state is cleared (if any)
-    2. The registered asyncio task (if any) is cancelled — this releases
-       the per-thread lock so the next message isn't queued behind it.
-    3. The PTY session is killed (via runner.cancel) — this also handles
-       the case where /cancel is sent before a task is registered
-       (e.g. session is idle but user wants to free resources).
-    4. Thread message counter is reset so the next message starts fresh.
+    Steps:
+    1. Clear pending decision state (if any)
+    2. Cancel the registered asyncio task (releases per-thread lock)
+    3. Kill the PTY session (via runner.cancel)
+    4. Reset thread message counter so next message starts fresh
     """
+    if update.message is None:
+        return
+
     thread_id = _get_thread_id(update)
 
     # Clear any pending decision state for this thread
@@ -479,10 +735,19 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if task is not None and not task.done():
         task.cancel()
         task_cancelled = True
+        # Wait briefly for the task to actually finish (release lock)
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass  # Best-effort wait; proceed regardless
         logger.info("[cmd_cancel] cancelled task [thread=%s]", thread_id)
 
-    # Kill the PTY session
-    cancelled = await runner.cancel(thread_id)
+    # Kill the PTY session (protected against exceptions)
+    try:
+        cancelled = await runner.cancel(thread_id)
+    except Exception as exc:
+        logger.warning("[cmd_cancel] runner.cancel failed: %s", exc)
+        cancelled = False
 
     # Reset thread counter so next message starts fresh (no stale resume)
     if cancelled or task_cancelled:
@@ -916,6 +1181,22 @@ async def _stream_to_telegram(
     for chunk in split_message(final):
         await _send_html_with_fallback(update, chunk)
 
+    # Screenshot forwarding (Story 5.1 / FR32) — post-processing after text.
+    screenshot_paths = detect_screenshots(raw_output)
+    if screenshot_paths:
+        try:
+            resolved = await db.resolve_thread_config(
+                thread_id if thread_id is not None else DEFAULT_THREAD_ID,
+                env_project_dir=config.project_dir,
+                env_cli_provider=config.cli_provider,
+                env_timeout_seconds=config.cli_timeout,
+                path=DB_PATH,
+            )
+            project_dir = resolved.project_dir
+        except Exception:
+            project_dir = config.project_dir
+        await _send_screenshots(update, screenshot_paths, project_dir=project_dir)
+
 
 async def _execute_and_reply_inner(
     update: Update,
@@ -1081,6 +1362,13 @@ async def _execute_and_reply_inner(
     for chunk in chunks:
         await _send_html_with_fallback(update, chunk)
 
+    # Screenshot forwarding (Story 5.1 / FR32) — post-processing after text.
+    screenshot_paths = detect_screenshots(full_output)
+    if screenshot_paths:
+        await _send_screenshots(
+            update, screenshot_paths, project_dir=resolved_project_dir
+        )
+
 
 def _escape_html(text: str) -> str:
     """Escape HTML special characters."""
@@ -1098,6 +1386,85 @@ async def _send_html_with_fallback(update: Update, text: str) -> None:
             await update.message.reply_text(plain[:MAX_MSG_LEN])
         except Exception as exc2:
             logger.error("Failed to send even plain text: %s", exc2)
+
+
+# ── Screenshot Forwarding (Story 5.1) ────────────────────────────
+
+# Telegram API limit for inline photos (sendPhoto). Larger files must go
+# through sendDocument.
+_TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+async def _send_screenshots(
+    update: Update,
+    screenshot_paths: list[str],
+    project_dir: str | None = None,
+) -> int:
+    """Send detected screenshots as Telegram photos (or documents if >10MB).
+
+    Graceful degradation: missing files, oversize images, or API errors are
+    logged and skipped — they never raise to the caller.
+
+    Args:
+        update: Telegram Update (used for reply context).
+        screenshot_paths: Paths detected from CLI output.
+        project_dir: Base directory for resolving relative paths (``./foo.png``).
+            Falls back to the current working directory if not provided.
+
+    Returns:
+        Number of screenshots successfully delivered to Telegram.
+    """
+    if not screenshot_paths:
+        return 0
+
+    sent = 0
+    for raw_path in screenshot_paths:
+        # Resolve relative paths against the thread's project_dir.
+        if raw_path.startswith("./") and project_dir:
+            resolved_path = os.path.join(project_dir, raw_path[2:])
+        else:
+            resolved_path = raw_path
+
+        # Existence check
+        try:
+            if not os.path.isfile(resolved_path):
+                logger.warning("[screenshot] file not found: %s", resolved_path)
+                continue
+        except OSError as exc:
+            logger.warning("[screenshot] stat failed for %s: %s", resolved_path, exc)
+            continue
+
+        # Size check — decides photo vs document
+        try:
+            size = os.path.getsize(resolved_path)
+        except OSError as exc:
+            logger.warning("[screenshot] getsize failed for %s: %s", resolved_path, exc)
+            continue
+
+        filename = os.path.basename(resolved_path)
+
+        try:
+            if size <= _TELEGRAM_PHOTO_MAX_BYTES:
+                with open(resolved_path, "rb") as fp:
+                    await update.message.reply_photo(
+                        photo=InputFile(fp, filename=filename),
+                        caption=f"📸 {filename}",
+                    )
+            else:
+                size_mb = size / (1024 * 1024)
+                with open(resolved_path, "rb") as fp:
+                    await update.message.reply_document(
+                        document=InputFile(fp, filename=filename),
+                        caption=f"📎 {filename} ({size_mb:.1f}MB)",
+                    )
+            sent += 1
+        except Exception as exc:
+            # Telegram API errors, file I/O races, etc. — log and skip.
+            logger.warning(
+                "[screenshot] failed to send %s: %s", resolved_path, exc
+            )
+
+    return sent
 
 
 # ── Error Handler ────────────────────────────────────────────────
@@ -1147,6 +1514,7 @@ def main() -> None:
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("provider", cmd_provider))
     app.add_handler(CommandHandler("info", cmd_info))
+    app.add_handler(CommandHandler("sessions", cmd_sessions))
 
     # Model selection callback
     app.add_handler(CallbackQueryHandler(handle_model_callback, pattern=r"^model:"))
@@ -1172,6 +1540,13 @@ def main() -> None:
             while True:
                 try:
                     await asyncio.sleep(config.cleanup_interval)
+
+                    # Snapshot threads alive before cleanup; after cleanup,
+                    # any thread_id no longer in the pool was cleaned up —
+                    # reset its _thread_sessions counter so the next message
+                    # starts fresh (no stale resume-count).
+                    before = set(runner._session_mgr.list_all().keys())
+
                     killed = runner._session_mgr.cleanup_idle(
                         max_age_seconds=config.idle_session_max_age
                     )
@@ -1180,6 +1555,13 @@ def main() -> None:
                     orphans = runner._session_mgr.cleanup_orphans()
                     if orphans:
                         logger.warning("[cleanup_orphans] killed %d orphan sessions", orphans)
+
+                    # Reset per-thread counters for cleaned-up threads
+                    after = set(runner._session_mgr.list_all().keys())
+                    for tid in before - after:
+                        if tid in _thread_sessions:
+                            _thread_sessions.pop(tid, None)
+                            logger.debug("[cleanup] reset _thread_sessions[%s]", tid)
 
                     # Expired decision replies
                     expired = runner._session_mgr.expired_decisions(
@@ -1190,6 +1572,8 @@ def main() -> None:
                         app_.bot_data.pop(f"thread:{tid}:pending_decision", None)
                         # Kill session — state may transition to DEAD
                         runner._session_mgr.kill(tid)
+                        # Reset per-thread counter for this thread too
+                        _thread_sessions.pop(tid, None)
                         # Notify user via bot
                         try:
                             # Notify the last known chat for this thread

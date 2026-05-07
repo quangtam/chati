@@ -1,6 +1,6 @@
 # Story 4.2: Session List Command (/sessions)
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -32,9 +32,19 @@ So that I can manage multiple projects and know which sessions need attention.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Implement `cmd_sessions()` handler in `chati.py`
-- [ ] Task 2: Register `/sessions` command in `main()`
-- [ ] Task 3: Write tests in `tests/test_cmd_sessions.py`
+- [x] Task 1: Implement `cmd_sessions()` handler in `chati.py`
+- [x] Task 2: Register `/sessions` command in `main()`
+- [x] Task 3: Write tests in `tests/test_cmd_sessions.py`
+
+### Review Findings
+
+- [x] [Review][Decision→Patch] State-specific text labels — added "⚠️ Waiting for input" for WAITING_FOR_USER, "Idle" for IDLE state
+- [x] [Review][Patch] Model fallback uses `"default"` instead of `context.user_data` (per-user global) — fixed
+- [x] [Review][Patch] Telegram 4096-char message length overflow — added `split_message()` guard — fixed
+- [x] [Review][Patch] DEAD sessions filtered from display list — only live sessions shown — fixed
+- [x] [Review][Patch] N+1 DB query pattern — now batches via `list_all_threads()` + dict lookup [chati.py:cmd_sessions] — **fixed in tech-debt sweep 2026-05-07**
+- [x] [Review][Patch] Dict iteration now sorted by thread_id — pagination stable across calls [chati.py:cmd_sessions] — **fixed in tech-debt sweep 2026-05-07**
+- [x] [Review][Patch] `_thread_sessions` now reset by cleanup_idle/cleanup_orphans via before/after snapshot [chati.py main cleanup loop] — **fixed in tech-debt sweep 2026-05-07**
 
 ## Dev Notes
 
@@ -269,3 +279,61 @@ From existing test files:
 ## Completion Notes
 
 Ultimate context engine analysis completed — comprehensive developer guide created.
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Claude Opus 4.7 via Kiro
+
+### Implementation Plan
+
+- **Task 1** — Added `cmd_sessions()` handler in `chati.py` (placed between `cmd_info` and `cmd_cancel`). Two branches:
+  - No sessions → friendly hint with slot availability (`max_slots/max_slots`).
+  - 1+ sessions → per-thread block (status emoji, bold thread label, project basename, provider, model, duration, message count) followed by a footer row (`Slots: used/max | /cancel <thread> to free`). Pagination at 10 (`... and N more`). Reused `_format_duration()` from Story 4.1 — no duplication.
+- **Task 2** — Registered `CommandHandler("sessions", cmd_sessions)` in `main()` directly after `/info`, under the existing `@authorized` decorator pattern. No changes to other handlers.
+- **Task 3** — 10 unit tests in `tests/test_cmd_sessions.py` covering:
+  - Empty pool → hint message + HTML parse mode.
+  - Single session → all fields rendered (thread, project, provider, model, emoji, message count).
+  - Multiple sessions → distinct emojis per state (🟢 STREAMING, ⏳ WAITING_FOR_USER, 💤 IDLE).
+  - `thread_id=None` → labelled `main`.
+  - Missing DB config → graceful fallback (no crash).
+  - Pagination: 11 sessions → first 10 + `... and 1 more`; exactly 10 → no marker.
+  - Read-only guarantee: state unchanged after call.
+  - Handler registered in `main()` (smoke source inspect).
+
+### Key Design Decisions
+
+- **Read-only guarantee** — no CLI shell-out, no state transitions. `list_all()` already returns a shallow copy so iteration is safe during cleanup.
+- **Per-thread DB lookup inside the loop** — simple and correct; SQLite WAL handles concurrent reads and each connection is per-operation (already the repo pattern). Optimizing to a batch query was not required for max 10 displayed rows.
+- **Project basename + provider + model** rendered on one compact line; duration + message count on a second line — mobile-first glance order, matches `/info` visual language.
+- **HTML escape on project/provider/model** — defensive for filesystem paths that may contain `<` / `&`.
+- **Fallback chain** — `thread_config.model → context.user_data['model'] → 'default'`; provider falls back to current runner provider name when DB row lacks one. This keeps the list meaningful even for freshly-created sessions without persisted config.
+- **Pagination at 10** — matches the ACs literally. Kept `page_size` as a local constant for easy future tuning.
+
+### Completion Notes
+
+- ✅ All 4 Acceptance Criteria satisfied (list render, pagination, empty message, ≥80% branch coverage for new code — 10 tests covering both branches, all state emojis, None thread_id, missing config, pagination edge cases, read-only guarantee).
+- ✅ All 3 Tasks complete with tests.
+- ✅ 10 new tests pass; full suite 211/211 pass — no regressions.
+- ✅ Diagnostics clean on `chati.py` and `tests/test_cmd_sessions.py`.
+- ✅ `/sessions` is read-only, instant (no CLI shell-out), HTML-formatted.
+- ✅ Reuses `_format_duration()` and `SessionManager.get_status_emoji()` per guardrails.
+
+### File List
+
+**Modified:**
+
+- `chati.py` — added `cmd_sessions()` handler (after `cmd_info()`); registered `CommandHandler("sessions", cmd_sessions)` in `main()`.
+
+**Added:**
+
+- `tests/test_cmd_sessions.py` — 10 unit tests across `TestCmdSessionsEmpty`, `TestCmdSessionsList`, `TestCmdSessionsPagination`, `TestCmdSessionsReadOnly`.
+
+### Change Log
+
+| Date       | Change                                                                                                         |
+|------------|----------------------------------------------------------------------------------------------------------------|
+| 2026-05-07 | Story 4.2 implemented: `/sessions` command + 10 unit tests. All ACs satisfied; full suite 211/211 pass. |
+| 2026-05-07 | Code review completed: 1 decision-needed, 3 patches, 3 deferred, 4 dismissed. |
+| 2026-05-07 | All 4 patches applied: state-specific text, model fallback fix, message length guard, DEAD session filtering. Tests: 13 pass. Full suite: 214/214. Status → done. |

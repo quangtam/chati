@@ -14,7 +14,8 @@
 #   done           — all stories complete
 
 project: Chati v2.0
-last_updated: 2026-05-07
+last_updated: 2026-05-08
+# 2026-05-08: 5-1-screenshot-detection-forwarding → review
 
 development_status:
   # Epic 0: Test Infrastructure (Foundation)
@@ -28,7 +29,7 @@ development_status:
   1-3-project-history-quick-rebinding: done
   1-4-per-thread-provider-switching: done
   1-5-configuration-resolution-chain: done
-  1-6-project-dir-per-thread-binding-fix: review
+  1-6-project-dir-per-thread-binding-fix: done
 
   # Epic 2: Adaptive Timeout & Reliable Streaming
   epic-2: done
@@ -38,8 +39,8 @@ development_status:
   2-4-session-operations: done
   2-5-streaming-progressive-edits: done
   2-6-idle-cleanup-status-reporting: done
-  2-7-cancel-cancels-running-task-fix: review
-  2-8-strip-spinner-noise-fix: review
+  2-7-cancel-cancels-running-task-fix: done
+  2-8-strip-spinner-noise-fix: done
 
   # Epic 3: Interactive Decision Forwarding
   epic-3: done
@@ -50,16 +51,16 @@ development_status:
 
   # Epic 4: CLI Information & Session Visibility
   epic-4: in-progress
-  4-1-cli-info-command: review
-  4-2-session-list-command: ready-for-dev
-  4-3-enhanced-status-help: ready-for-dev
+  4-1-cli-info-command: done
+  4-2-session-list-command: done
+  4-3-enhanced-status-help: review
 
   # Epic 5: Screenshot Forwarding (Growth)
-  epic-5: backlog
-  5-1-screenshot-detection-forwarding: backlog
+  epic-5: in-progress
+  5-1-screenshot-detection-forwarding: review
 
   # Epic 6: Voice Communication (Growth)
-  epic-6: backlog
-  6-1-voice-input-whisper: backlog
-  6-2-voice-output-tts: backlog
-  6-3-voice-configuration: backlog
+  epic-6: in-progress
+  6-1-voice-input-whisper: ready-for-dev
+  6-2-voice-output-tts: ready-for-dev
+  6-3-voice-configuration: ready-for-dev
