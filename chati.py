@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -30,8 +31,8 @@ from telegram.ext import (
 from config import Config
 from cli_runner import CliRunner
 from cli_providers import get_available_providers
-from message_utils import format_output, split_message, strip_ansi, extract_final_response
-from session_manager import DecisionPrompt
+from message_utils import format_output, split_message, strip_ansi, extract_final_response, strip_streaming_noise
+from session_manager import DecisionPrompt, PtyState, SessionManager
 import db
 from db import DEFAULT_THREAD_ID, DB_PATH
 
@@ -49,6 +50,11 @@ logger = logging.getLogger(__name__)
 # Track which threads have had at least one message processed.
 # Key: thread_id (int or None for non-thread), Value: message count.
 _thread_sessions: dict[int | None, int] = {}
+
+# Track the currently-running asyncio task per thread, so /cancel can
+# abort the task (not just kill the PTY process). Set in _execute_and_reply,
+# cleared in finally, cancelled in cmd_cancel.
+_thread_tasks: dict[int | None, asyncio.Task] = {}
 
 MAX_MSG_LEN = 4096
 
@@ -313,14 +319,174 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(status)
 
 
+def _format_duration(seconds: float) -> str:
+    """Format elapsed seconds as human-readable duration.
+
+    Examples: 45s → "45s", 3660s → "1h 1m", 125s → "2m 5s"
+    """
+    total = int(seconds) if seconds > 0 else 0
+    if total < 60:
+        return f"{total}s"
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {secs}s"
+
+
+@authorized
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /info — show current session details (read-only).
+
+    Layout prioritizes what users care most on mobile:
+      1. Project (bold, top — "where am I working")
+      2. Status (emoji + state)
+      3. Pending-decision alert (if any)
+      4. Provider + model
+      5. Duration / last activity / messages
+      6. Technical details (thread, timeout, PID, binary, pool, usage)
+
+    Never shells out to CLI (must be instant). Never mutates session state.
+    """
+    await update.message.reply_chat_action(ChatAction.TYPING)
+
+    thread_id = _get_thread_id(update)
+    lookup_id = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+
+    # Thread config from SQLite (best-effort)
+    try:
+        thread_config = await db.get_thread_config(lookup_id, path=DB_PATH)
+    except Exception as exc:
+        logger.warning("[cmd_info] failed to load thread config: %s", exc)
+        thread_config = None
+
+    provider = runner.provider
+    provider_name = provider.name
+    cli_path = provider.config.cli_path
+    user_model = context.user_data.get("model")
+    model = (thread_config.model if thread_config and thread_config.model else None) or user_model or "default"
+    project_dir = (thread_config.project_dir if thread_config else None) or config.project_dir
+    project_name = Path(project_dir).name if project_dir else "—"
+    timeout_s = (
+        thread_config.timeout_seconds
+        if thread_config and thread_config.timeout_seconds
+        else config.cli_timeout
+    )
+    thread_provider = (
+        thread_config.cli_provider if thread_config and thread_config.cli_provider else config.cli_provider
+    )
+
+    # Session pool stats
+    session_mgr = runner._session_mgr
+    active_total = session_mgr.active_count()
+    max_slots = session_mgr.max_sessions
+    thread_label = str(thread_id) if thread_id is not None else "main"
+
+    # Active session info (from memory, no CLI shell-out)
+    session = session_mgr.get(thread_id)
+
+    # ── Branch A: no active session ──────────────────────────────
+    if session is None or session.state == PtyState.DEAD:
+        lines = [
+            f"📁 <b>{project_name}</b>",
+            f"   <code>{project_dir}</code>",
+            "",
+            "💤 <b>No active session</b>",
+            "",
+            f"📡 {provider_name}  |  🤖 <code>{model}</code>",
+            "",
+            "<i>Send a message to start a session.</i>",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🧵 Thread: <code>{thread_label}</code>  |  "
+            f"⚙️ Timeout: {timeout_s}s  |  "
+            f"⚡ Pool: {active_total}/{max_slots}",
+            f"🛠 Binary: <code>{cli_path}</code>",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        return
+
+    # ── Branch B: active session ─────────────────────────────────
+    now = time.monotonic()
+    duration = _format_duration(now - session.created_at)
+    idle_for = _format_duration(now - session.last_active_at)
+    msg_count = _thread_sessions.get(thread_id, 0)
+    status_emoji = SessionManager.get_status_emoji(session.state)
+    state_name = session.state.value
+    ready_mark = "ready" if session.ready else "warming up"
+    usage_text = provider.parse_usage_output("") or "not available"
+
+    lines = [
+        # 1. Project — top priority, bold
+        f"📁 <b>{project_name}</b>",
+        f"   <code>{project_dir}</code>",
+        "",
+        # 2. Status — what's happening right now
+        f"{status_emoji} <b>{state_name}</b>  ({ready_mark})",
+    ]
+
+    # 3. Pending-decision alert — if applicable, right after status
+    if session.state == PtyState.WAITING_FOR_USER:
+        elapsed = now - session.last_active_at
+        remaining = max(0, config.decision_reply_timeout - int(elapsed))
+        lines.append(
+            f"⚠️ <b>Waiting for your reply</b> — expires in {_format_duration(remaining)}"
+        )
+
+    lines.extend([
+        "",
+        # 4. Provider + model — who you're talking to
+        f"📡 {provider_name}  |  🤖 <code>{model}</code>",
+        "",
+        # 5. Session usage — duration, activity, messages
+        f"⏱️ Duration: <b>{duration}</b>  (last activity: {idle_for} ago)",
+        f"💬 Messages: <b>{msg_count}</b>",
+        f"💳 Usage: {usage_text}",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        # 6. Technical details — debug row
+        f"🧵 Thread: <code>{thread_label}</code>  |  "
+        f"⚙️ Timeout: {timeout_s}s  |  "
+        f"⚡ Pool: {active_total}/{max_slots}",
+        f"🔢 PID: <code>{session.pid}</code>  |  "
+        f"🛠 Binary: <code>{cli_path}</code>",
+    ])
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 @authorized
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /cancel — kill running CLI process for this thread."""
+    """Handle /cancel — kill running CLI process for this thread.
+
+    Three things happen:
+    1. Pending decision state is cleared (if any)
+    2. The registered asyncio task (if any) is cancelled — this releases
+       the per-thread lock so the next message isn't queued behind it.
+    3. The PTY session is killed (via runner.cancel) — this also handles
+       the case where /cancel is sent before a task is registered
+       (e.g. session is idle but user wants to free resources).
+    4. Thread message counter is reset so the next message starts fresh.
+    """
     thread_id = _get_thread_id(update)
+
     # Clear any pending decision state for this thread
     context.bot_data.pop(f"thread:{thread_id}:pending_decision", None)
+
+    # Cancel the running task (releases per-thread lock)
+    task = _thread_tasks.pop(thread_id, None)
+    task_cancelled = False
+    if task is not None and not task.done():
+        task.cancel()
+        task_cancelled = True
+        logger.info("[cmd_cancel] cancelled task [thread=%s]", thread_id)
+
+    # Kill the PTY session
     cancelled = await runner.cancel(thread_id)
-    if cancelled:
+
+    # Reset thread counter so next message starts fresh (no stale resume)
+    if cancelled or task_cancelled:
+        _thread_sessions[thread_id] = 0
         await update.message.reply_text("✅ Cancelled running CLI process.")
     else:
         await update.message.reply_text("ℹ️ No active CLI process to cancel.")
@@ -558,6 +724,7 @@ async def _execute_and_reply(
     - Typing indicator keepalive
     - Idle watchdog (kills stuck processes)
     - Sends partial output if process dies mid-stream
+    - Task is registered in _thread_tasks so /cancel can abort it
     """
     thread_id = _get_thread_id(update)
 
@@ -568,8 +735,22 @@ async def _execute_and_reply(
             "Use /cancel to stop the current one."
         )
 
-    # The runner's per-thread lock handles queuing automatically
-    await _execute_and_reply_inner(update, context, prompt, thread_id)
+    # Register current task so /cancel can abort it
+    task = asyncio.current_task()
+    if task is not None:
+        _thread_tasks[thread_id] = task
+
+    try:
+        # The runner's per-thread lock handles queuing automatically
+        await _execute_and_reply_inner(update, context, prompt, thread_id)
+    except asyncio.CancelledError:
+        logger.info("[execute_and_reply] cancelled [thread=%s]", thread_id)
+        # Re-raise so asyncio knows we honored the cancellation
+        raise
+    finally:
+        # Only unregister if our task is still the registered one
+        if _thread_tasks.get(thread_id) is task:
+            _thread_tasks.pop(thread_id, None)
 
 
 async def _handle_decision_prompt(
@@ -689,7 +870,7 @@ async def _stream_to_telegram(
 
             raw_lines.append(line)
             now = _t.monotonic()
-            clean_line = strip_ansi(line).rstrip()
+            clean_line = strip_streaming_noise(strip_ansi(line)).rstrip()
             if not clean_line:
                 continue
 
@@ -784,7 +965,7 @@ async def _execute_and_reply_inner(
 
     import time
 
-    # Resolve per-thread config (provider, model, timeout from SQLite with .env fallback)
+    # Resolve per-thread config (provider, model, timeout, project_dir from SQLite with .env fallback)
     try:
         resolved = await db.resolve_thread_config(
             thread_id if thread_id is not None else DEFAULT_THREAD_ID,
@@ -796,10 +977,12 @@ async def _execute_and_reply_inner(
         )
         resolved_timeout = resolved.timeout_seconds
         resolved_model = resolved.model or model
+        resolved_project_dir = resolved.project_dir
     except Exception as exc:
         logger.warning("[resolve_thread_config] fallback to defaults: %s", exc)
         resolved_timeout = config.cli_timeout
         resolved_model = model
+        resolved_project_dir = config.project_dir
 
     try:
         async for line in runner.execute_stream(
@@ -808,6 +991,7 @@ async def _execute_and_reply_inner(
             model=resolved_model,
             resume=resume,
             timeout_seconds=resolved_timeout,
+            project_dir=resolved_project_dir,
         ):
             # Handle DecisionPrompt — CLI is waiting for user input
             if isinstance(line, DecisionPrompt):
@@ -821,8 +1005,8 @@ async def _execute_and_reply_inner(
             raw_lines.append(line)
             now = time.monotonic()
 
-            # Strip ANSI for preview
-            clean_line = strip_ansi(line).rstrip()
+            # Strip ANSI and spinner/thinking noise for preview
+            clean_line = strip_streaming_noise(strip_ansi(line)).rstrip()
             if not clean_line:
                 continue
 
@@ -962,6 +1146,7 @@ def main() -> None:
     app.add_handler(CommandHandler("project", cmd_project))
     app.add_handler(CommandHandler("projects", cmd_projects))
     app.add_handler(CommandHandler("provider", cmd_provider))
+    app.add_handler(CommandHandler("info", cmd_info))
 
     # Model selection callback
     app.add_handler(CallbackQueryHandler(handle_model_callback, pattern=r"^model:"))

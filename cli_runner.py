@@ -111,9 +111,16 @@ class CliRunner:
     # ── PTY session management ───────────────────────────────────
 
     async def _get_or_create_session(
-        self, thread_id: int | None, *, model: str | None = None
+        self, thread_id: int | None, *, model: str | None = None,
+        project_dir: str | None = None,
     ) -> PtySession | None:
-        """Get existing session or spawn a new interactive CLI via PTY."""
+        """Get existing session or spawn a new interactive CLI via PTY.
+
+        Args:
+            project_dir: Per-thread working directory for new sessions.
+                If None, falls back to self._config.project_dir (.env default).
+                Existing sessions reuse their original spawn cwd regardless.
+        """
         session = self._session_mgr.get(thread_id)
         if session and session.alive:
             return session
@@ -127,9 +134,12 @@ class CliRunner:
             return None
 
         env = self._env
-        cwd = self._config.project_dir
+        cwd = project_dir or self._config.project_dir
 
-        logger.info("Spawning PTY session [thread=%s]: %s", thread_id, " ".join(args))
+        logger.info(
+            "Spawning PTY session [thread=%s, cwd=%s]: %s",
+            thread_id, cwd, " ".join(args),
+        )
 
         # Spawn in a thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()
@@ -209,16 +219,21 @@ class CliRunner:
         model: str | None = None,
         resume: bool = False,
         timeout_seconds: int | None = None,
+        project_dir: str | None = None,
     ) -> AsyncGenerator["str | DecisionPrompt", None]:
         """Execute a prompt and yield output lines.
 
         Args:
             timeout_seconds: Per-thread override. If None, uses config.cli_timeout.
+            project_dir: Per-thread working directory. If None, falls back to
+                config.project_dir. Existing sessions reuse their original cwd.
         """
         lock = self._get_lock(thread_id)
 
         async with lock:
-            session = await self._get_or_create_session(thread_id, model=model)
+            session = await self._get_or_create_session(
+                thread_id, model=model, project_dir=project_dir,
+            )
 
             if session and session.alive:
                 async for line in self._stream_pty(
@@ -227,7 +242,8 @@ class CliRunner:
                     yield line
             else:
                 async for line in self._stream_non_interactive(
-                    prompt, thread_id=thread_id, model=model, resume=resume
+                    prompt, thread_id=thread_id, model=model, resume=resume,
+                    project_dir=project_dir,
                 ):
                     yield line
 
@@ -624,10 +640,19 @@ class CliRunner:
         thread_id: int | None,
         model: str | None,
         resume: bool,
+        project_dir: str | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Fallback: non-interactive single-shot execution."""
+        """Fallback: non-interactive single-shot execution.
+
+        Args:
+            project_dir: Per-thread cwd. If None, falls back to config.project_dir.
+        """
         args = self._provider.build_args(prompt, model=model, resume=resume)
-        logger.info("Non-interactive [thread=%s]: %s", thread_id, " ".join(args))
+        cwd = project_dir or self._config.project_dir
+        logger.info(
+            "Non-interactive [thread=%s, cwd=%s]: %s",
+            thread_id, cwd, " ".join(args),
+        )
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -635,7 +660,7 @@ class CliRunner:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=self._config.project_dir,
+                cwd=cwd,
                 env=self._env,
             )
             assert process.stdout is not None

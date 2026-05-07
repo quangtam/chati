@@ -14,7 +14,7 @@
 #   done           — all stories complete
 
 project: Chati v2.0
-last_updated: 2026-05-06
+last_updated: 2026-05-07
 
 development_status:
   # Epic 0: Test Infrastructure (Foundation)
@@ -28,6 +28,7 @@ development_status:
   1-3-project-history-quick-rebinding: done
   1-4-per-thread-provider-switching: done
   1-5-configuration-resolution-chain: done
+  1-6-project-dir-per-thread-binding-fix: review
 
   # Epic 2: Adaptive Timeout & Reliable Streaming
   epic-2: done
@@ -37,6 +38,8 @@ development_status:
   2-4-session-operations: done
   2-5-streaming-progressive-edits: done
   2-6-idle-cleanup-status-reporting: done
+  2-7-cancel-cancels-running-task-fix: review
+  2-8-strip-spinner-noise-fix: review
 
   # Epic 3: Interactive Decision Forwarding
   epic-3: done
@@ -46,10 +49,10 @@ development_status:
   3-4-decision-reply-timeout: done
 
   # Epic 4: CLI Information & Session Visibility
-  epic-4: backlog
-  4-1-cli-info-command: backlog
-  4-2-session-list-command: backlog
-  4-3-enhanced-status-help: backlog
+  epic-4: in-progress
+  4-1-cli-info-command: review
+  4-2-session-list-command: ready-for-dev
+  4-3-enhanced-status-help: ready-for-dev
 
   # Epic 5: Screenshot Forwarding (Growth)
   epic-5: backlog

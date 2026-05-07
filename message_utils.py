@@ -27,6 +27,73 @@ def strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
+# ── Streaming noise filter ───────────────────────────────────────
+
+# Braille spinner characters commonly used by CLIs (Kiro, npm, etc.)
+# Unicode range U+2800–U+28FF covers all braille patterns.
+_BRAILLE_SPINNER_RE = re.compile(r"[\u2800-\u28FF]")
+
+# Lines that are pure CLI spinner/thinking frames (to be removed entirely).
+# Matches: "⠋ Thinking...", "⠙ Loading...", "/ Thinking", "- Waiting...",
+# "⠋", "Thinking...", "...", "…", optionally with leading/trailing whitespace.
+_SPINNER_LINE_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"[\u2800-\u28FF]+[ \t]*(?:Thinking|Loading|Waiting|Processing|Working)?\.{0,}"
+    r"|[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)\.{0,}"
+    r"|Thinking\.{2,}"
+    r"|Loading\.{2,}"
+    r"|\.{3,}"
+    r"|\u2026+"  # ellipsis char
+    r")[ \t]*$"
+)
+
+
+def _collapse_carriage_returns(line: str) -> str:
+    """Keep only the text after the LAST \\r on each line.
+
+    Spinner animation writes like "\\r⠋ Thinking...\\r⠙ Thinking..."
+    collapse to just the final frame.
+    """
+    if "\r" not in line:
+        return line
+    # Split on \r; the last non-empty segment is what the terminal would show
+    segments = line.split("\r")
+    # Keep the last non-empty segment; if all empty, return empty
+    for seg in reversed(segments):
+        if seg:
+            return seg
+    return ""
+
+
+def strip_streaming_noise(text: str) -> str:
+    """Clean a streaming chunk for live preview display.
+
+    Handles:
+    - Carriage-return overwrites (\\r) — collapses to final frame per line
+    - Braille spinner frames (⠋⠙⠹...) — removes full spinner-only lines
+    - "Thinking..." / "Loading..." animation lines — removes them
+    - Bare ellipsis lines (... or …) — removes them
+
+    Preserves real content including lines that end with "..." mid-sentence.
+
+    Safe to call on streaming chunks (doesn't require full output).
+    """
+    # Split into lines, collapse CR per-line, filter spinner-only lines
+    out_lines: list[str] = []
+    for raw in text.split("\n"):
+        line = _collapse_carriage_returns(raw)
+        if _SPINNER_LINE_RE.match(line):
+            continue
+        # Also strip any remaining standalone braille spinner chars embedded
+        # in otherwise real lines (rare but seen with some CLIs)
+        cleaned = _BRAILLE_SPINNER_RE.sub("", line).rstrip()
+        # If stripping braille chars emptied the line, skip it
+        if not cleaned.strip() and line.strip():
+            continue
+        out_lines.append(cleaned if cleaned != line else line)
+    return "\n".join(out_lines)
+
+
 # ── Telegram Message Limits ──────────────────────────────────────
 
 MAX_MESSAGE_LENGTH = 4096
@@ -296,7 +363,10 @@ _TOOL_LINE_PATTERNS = [
     r"Found \d+ (?:results?|files?|matches?).*",
     r"- Completed in [\d.]+s.*",
     r"Thinking\.{2,}",
+    r"[\u2800-\u28FF]+\s*(?:Thinking|Loading|Waiting|Processing|Working)?\.{0,}",
+    r"[\u2800-\u28FF]+",  # bare braille spinner chars
     r"\.{3,}\s*",  # Bare ellipsis (thinking indicator)
+    r"\u2026+\s*",  # Unicode ellipsis char …
     r"\(using tool:.*\)",
 ]
 
@@ -328,7 +398,11 @@ def extract_final_response(text: str) -> str:
     invocations) and return everything from there. Falls back to
     regex-based filtering if no "> " marker is found.
     """
-    # Remove cursor junk and residual control chars first
+    # First pass: collapse carriage returns and strip spinner frames.
+    # This handles animation noise regardless of which strategy runs below.
+    text = strip_streaming_noise(text)
+
+    # Remove cursor junk and residual control chars
     text = _CURSOR_JUNK_RE.sub("", text)
 
     # Strategy 1: Find the "> " response marker.

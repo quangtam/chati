@@ -99,6 +99,18 @@ class CliProvider(ABC):
         """
         return [self.config.cli_path, "--version"]
 
+    def parse_usage_output(self, stdout: str) -> str | None:
+        """Parse CLI output for usage/token information.
+
+        Returns a human-readable usage string, or None if not supported.
+        Override in subclass to extract provider-specific usage data
+        (e.g., token counts, credit balance, rate limits).
+
+        Best-effort per FR25: providers without usage reporting just
+        return None and the /info command shows "Not available".
+        """
+        return None
+
     def build_interactive_args(self, *, model: str | None = None) -> list[str] | None:
         """Return CLI args to start an interactive session.
 
