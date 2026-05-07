@@ -12,6 +12,7 @@ Features:
 
 import asyncio
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -28,7 +29,10 @@ from telegram.ext import (
 
 from config import Config
 from cli_runner import CliRunner
+from cli_providers import get_available_providers
 from message_utils import format_output, split_message, strip_ansi, extract_final_response
+import db
+from db import DEFAULT_THREAD_ID, DB_PATH
 
 # ── Globals ──────────────────────────────────────────────────────
 
@@ -242,12 +246,20 @@ async def handle_model_callback(update: Update, context: ContextTypes.DEFAULT_TY
     model_id = data.removeprefix("model:")
     context.user_data["model"] = model_id
 
+    # Persist to SQLite (per-thread) so it survives bot restart
+    thread_id = _get_thread_id(update) or DEFAULT_THREAD_ID
+    try:
+        await db.upsert_thread_config(thread_id, model=model_id, path=DB_PATH)
+    except ValueError:
+        # Thread has no row yet (no project_dir) — only store in user_data
+        pass
+
     emoji = _model_emoji(model_id)
     await query.edit_message_text(
         f"{emoji} Model đã chuyển sang: <b>{model_id}</b>",
         parse_mode=ParseMode.HTML,
     )
-    logger.info("User %s switched model to: %s", update.effective_user.id, model_id)
+    logger.info("User %s switched model to: %s (thread=%s)", update.effective_user.id, model_id, thread_id)
 
 
 # ── Other Commands ───────────────────────────────────────────────
@@ -329,6 +341,155 @@ async def cmd_new_session(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /resume — explicitly resume previous session."""
     await _execute_and_reply(update, context, "")
+
+
+@authorized
+async def cmd_project(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /project <path> — bind current thread to a project directory."""
+    text = update.message.text or ""
+    parts = text.split(maxsplit=1)
+
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "⚠️ Usage: <code>/project &lt;path&gt;</code>\n\n"
+            "Example: <code>/project /home/user/myapp</code>\n"
+            "Use <code>/projects</code> to see previously-used projects.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    path = parts[1].strip()
+    if not os.path.isdir(path):
+        await update.message.reply_text(
+            f"⚠️ Path not found or not a directory:\n<code>{_escape_html(path)}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    thread_id = _get_thread_id(update) or DEFAULT_THREAD_ID
+    await db.upsert_thread_config(thread_id, project_dir=path, path=DB_PATH)
+
+    thread_label = f"thread {thread_id}" if thread_id != DEFAULT_THREAD_ID else "main chat"
+    await update.message.reply_text(
+        f"✅ Bound {thread_label} to project:\n<code>{_escape_html(path)}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    logger.info("[cmd_project] thread=%s → %s", thread_id, path)
+
+
+@authorized
+async def cmd_projects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /projects — show inline keyboard of previously-used projects."""
+    projects = await db.list_distinct_project_dirs(path=DB_PATH)
+    if not projects:
+        await update.message.reply_text(
+            "No previous projects found. Use <code>/project &lt;path&gt;</code> to bind a project.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # Store full paths for callback lookup (callback_data has 64-byte limit)
+    context.chat_data["_projects_list"] = projects
+
+    # Mark current thread's binding if any
+    thread_id = _get_thread_id(update) or DEFAULT_THREAD_ID
+    current_config = await db.get_thread_config(thread_id, path=DB_PATH)
+    current_path = current_config.project_dir if current_config else None
+
+    keyboard = []
+    for idx, path in enumerate(projects):
+        marker = "✓ " if path == current_path else ""
+        display = path if len(path) <= 55 else "..." + path[-52:]
+        label = f"{marker}{display}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"project:{idx}")])
+
+    await update.message.reply_text(
+        "📂 Select a project to bind this thread to:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def handle_projects_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle project selection from the /projects inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        idx = int(query.data.split(":", 1)[1])
+        projects = context.chat_data.get("_projects_list", [])
+        path = projects[idx]
+    except (ValueError, IndexError, KeyError):
+        await query.edit_message_text(
+            "⚠️ Invalid selection. Try /projects again."
+        )
+        return
+
+    thread_id = _get_thread_id(update) or DEFAULT_THREAD_ID
+    await db.upsert_thread_config(thread_id, project_dir=path, path=DB_PATH)
+
+    thread_label = f"thread {thread_id}" if thread_id != DEFAULT_THREAD_ID else "main chat"
+    await query.edit_message_text(
+        f"✅ Bound {thread_label} to:\n<code>{_escape_html(path)}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    logger.info("[cmd_projects] thread=%s → %s (from history)", thread_id, path)
+
+
+@authorized
+async def cmd_provider(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /provider <name> — switch CLI provider for current thread."""
+    text = update.message.text or ""
+    parts = text.split(maxsplit=1)
+
+    available = get_available_providers()
+
+    if len(parts) < 2:
+        await update.message.reply_text(
+            f"⚠️ Usage: <code>/provider &lt;name&gt;</code>\n\n"
+            f"Available: <code>{', '.join(sorted(available.keys()))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    name = parts[1].strip().lower()
+    if name not in available:
+        await update.message.reply_text(
+            f"⚠️ Unknown provider: <code>{_escape_html(name)}</code>\n\n"
+            f"Available: <code>{', '.join(sorted(available.keys()))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    thread_id = _get_thread_id(update) or DEFAULT_THREAD_ID
+
+    # Guard: reject switch if an active session exists for this thread
+    session = runner._sessions.get(thread_id)
+    if session and session.alive:
+        await update.message.reply_text(
+            "⚠️ Active process running. Use /cancel first, then try again.",
+        )
+        return
+
+    try:
+        await db.upsert_thread_config(thread_id, cli_provider=name, path=DB_PATH)
+    except ValueError:
+        # No row yet and no project_dir — must bind project first
+        await update.message.reply_text(
+            "⚠️ No project bound yet. Use <code>/project &lt;path&gt;</code> first.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    thread_label = f"thread {thread_id}" if thread_id != DEFAULT_THREAD_ID else "main chat"
+    provider_class = available[name]
+    await update.message.reply_text(
+        f"✅ {thread_label} provider switched to <b>{provider_class.name}</b> "
+        f"(<code>{name}</code>)",
+        parse_mode=ParseMode.HTML,
+    )
+    logger.info("[cmd_provider] thread=%s → %s", thread_id, name)
 
 
 # ── BMAD Slash Command Handler ───────────────────────────────────
@@ -567,6 +728,12 @@ def main() -> None:
     logger.info("CLI Provider: %s", config.cli_provider)
     logger.info("Timeout: %ds", config.cli_timeout)
 
+    # Initialize SQLite schema + default row (v2.0)
+    asyncio.get_event_loop().run_until_complete(
+        db.init_db(DB_PATH, default_project_dir=config.project_dir)
+    )
+    logger.info("SQLite initialized: %s", DB_PATH)
+
     app = (
         Application.builder()
         .token(config.telegram_token)
@@ -583,9 +750,15 @@ def main() -> None:
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("new", cmd_new_session))
     app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("project", cmd_project))
+    app.add_handler(CommandHandler("projects", cmd_projects))
+    app.add_handler(CommandHandler("provider", cmd_provider))
 
     # Model selection callback
     app.add_handler(CallbackQueryHandler(handle_model_callback, pattern=r"^model:"))
+
+    # Project selection callback (/projects)
+    app.add_handler(CallbackQueryHandler(handle_projects_callback, pattern=r"^project:"))
 
     # BMAD slash commands
     app.add_handler(MessageHandler(
