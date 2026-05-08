@@ -206,6 +206,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         "<b>📊 Status:</b>\n"
         "/status — CLI health check\n"
+        "/git — Git info (branch, log, status, diff)\n"
         "/voice — Toggle voice output (/voice status for config)\n"
         "/skills — List BMAD workflows\n"
         "/help — This message\n\n"
@@ -983,6 +984,77 @@ async def handle_bmad_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     prompt = kiro_command if not extra else f"{kiro_command} {extra}"
 
     await _execute_and_reply(update, context, prompt)
+
+
+# ── Git Commands (direct, no CLI proxy) ──────────────────────────
+
+
+@authorized
+async def cmd_git(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /git — run git commands directly on the project directory.
+
+    Usage:
+        /git branch     — list branches, highlight current
+        /git log        — last 10 commits (short format)
+        /git status     — working tree status
+        /git diff       — show unstaged changes (truncated)
+        /git <anything> — run arbitrary git subcommand
+    """
+    text = (update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    subcommand = parts[1] if len(parts) > 1 else "status"
+
+    # Resolve project dir for this thread
+    thread_id = _get_thread_id(update)
+    lookup_id = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+    try:
+        tc = await db.get_thread_config(lookup_id, path=DB_PATH)
+        project_dir = (tc.project_dir if tc else None) or config.project_dir
+    except Exception:
+        project_dir = config.project_dir
+
+    # Build git command with sensible defaults
+    if subcommand == "log":
+        cmd = ["git", "log", "--oneline", "--graph", "-15"]
+    elif subcommand == "branch":
+        cmd = ["git", "branch", "-a"]
+    elif subcommand == "status":
+        cmd = ["git", "status", "--short", "--branch"]
+    elif subcommand == "diff":
+        cmd = ["git", "diff", "--stat"]
+    else:
+        # Arbitrary git subcommand
+        cmd = ["git"] + subcommand.split()
+
+    await update.message.reply_chat_action(ChatAction.TYPING)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=project_dir,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        output = stdout.decode("utf-8", errors="replace").strip()
+    except asyncio.TimeoutError:
+        output = "⏱ Git command timed out (10s)"
+    except FileNotFoundError:
+        output = "❌ git not found in PATH"
+    except Exception as exc:
+        output = f"❌ Error: {exc}"
+
+    if not output:
+        output = "(no output)"
+
+    # Truncate to fit Telegram limit
+    if len(output) > MAX_MSG_LEN - 50:
+        output = output[: MAX_MSG_LEN - 80] + "\n\n... (truncated)"
+
+    await update.message.reply_text(
+        f"<pre>{_escape_html(output)}</pre>",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 # ── Voice Toggle Command (Story 6.2 / 6.3) ──────────────────────
@@ -2040,6 +2112,7 @@ def main() -> None:
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("voice", cmd_voice))
+    app.add_handler(CommandHandler("git", cmd_git))
 
     # Model selection callback
     app.add_handler(CallbackQueryHandler(handle_model_callback, pattern=r"^model:"))
