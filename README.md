@@ -206,6 +206,10 @@ pip install -r requirements.txt
 | `/voice` | Toggle voice output on/off |
 | `/voice status` | Show voice configuration for this thread |
 | `/voice speed 1.5` | Set TTS playback speed (0.25–4.0) |
+| `/git` | Git info — branch, log, status, diff |
+| `/git log` | Last 15 commits (graph) |
+| `/git status` | Working tree status |
+| `/git diff` | Unstaged changes (stat) |
 | `/status` | CLI health check |
 | `/skills` | List available BMAD workflows |
 
