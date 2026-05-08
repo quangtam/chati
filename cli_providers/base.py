@@ -1,5 +1,6 @@
 """Base class and config for CLI providers."""
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -44,6 +45,11 @@ class CliProvider(ABC):
     # Prefix that marks the start of the actual AI response in stdout.
     # Empty string means all output is treated as response (no tool noise).
     response_marker: str = ""
+
+    # v2.0: Provider-specific decision prompt patterns (optional override).
+    # Used in addition to generic patterns ([y/N], [Y/n], etc.) for detecting
+    # when the CLI is waiting for interactive input.
+    decision_prompt_patterns: list[re.Pattern] = []
 
     def __init__(self, config: CliProviderConfig) -> None:
         self.config = config
@@ -92,6 +98,18 @@ class CliProvider(ABC):
         Default: <cli> --version
         """
         return [self.config.cli_path, "--version"]
+
+    def parse_usage_output(self, stdout: str) -> str | None:
+        """Parse CLI output for usage/token information.
+
+        Returns a human-readable usage string, or None if not supported.
+        Override in subclass to extract provider-specific usage data
+        (e.g., token counts, credit balance, rate limits).
+
+        Best-effort per FR25: providers without usage reporting just
+        return None and the /info command shows "Not available".
+        """
+        return None
 
     def build_interactive_args(self, *, model: str | None = None) -> list[str] | None:
         """Return CLI args to start an interactive session.

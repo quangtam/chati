@@ -24,16 +24,52 @@ Chat with any AI coding CLI from your phone. No laptop needed.
   </video>
 </p>
 
-Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, Gemini, Codex) — send a message, get code back.
+Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, Gemini, Codex) — send a message, get code back. Voice in, voice out.
 
 ## Features
 
+### Core
+
 - **Multi-CLI** — pluggable drivers for Kiro, Claude Code, Gemini, OpenAI Codex
-- **Streaming** — real-time response streaming with progressive message edits
-- **Thread = Session** — each chat thread maps to a separate conversation
+- **Streaming** — real-time response streaming with progressive message edits (ChatGPT-like)
+- **Thread = Session** — each chat thread maps to a separate CLI conversation
 - **Model selection** — `/model` command with inline keyboard to switch AI models
 - **BMAD workflow** — slash command routing for BMAD skills
-- **Markdown → HTML** — CLI output converted to native chat formatting
+
+### v2.0 — Persistence & Multi-Project
+
+- **SQLite persistence** — thread configs, project bindings, and preferences survive bot restarts
+- **Multi-project** — bind different threads to different project directories (`/project`, `/projects`)
+- **Per-thread provider** — switch CLI provider per thread (`/provider claude`)
+- **3-layer config resolution** — per-thread SQLite → global `.env` → hardcoded defaults
+
+### v2.0 — Session Management
+
+- **Concurrent session pool** — multiple threads run in parallel (configurable max)
+- **Adaptive timeout** — per-thread timeout configuration
+- **Idle cleanup** — stale sessions auto-killed after configurable idle period
+- **Session visibility** — `/info` shows full session details, `/sessions` lists all active
+
+### v2.0 — Interactive Decision Forwarding
+
+- **Decision detection** — detects when CLI is waiting for user input (Y/n prompts, file selections)
+- **Forwarding** — decision prompts forwarded to Telegram with context
+- **Reply piping** — your reply is piped back to the CLI process
+- **Timeout** — auto-kills sessions if decision reply not received within configurable window
+
+### v2.0 — Screenshot Forwarding
+
+- **Auto-detect** — detects image file paths in CLI output (`.png`, `.jpg`, `.gif`, `.webp`)
+- **Auto-send** — screenshots sent as Telegram photos (or documents if >10MB)
+
+### v2.0 — Voice Communication
+
+- **Voice input** — send voice messages, transcribed via Whisper (OpenAI cloud or faster-whisper local)
+- **Voice output** — responses read aloud via TTS (OpenAI TTS or edge-tts free)
+- **Auto-backend** — if `OPENAI_API_KEY` is set, uses OpenAI; otherwise uses free local backends
+- **Code-heavy detection** — skips TTS for code-heavy responses (>50% code blocks)
+- **Per-thread config** — `/voice` toggle, `/voice speed 1.5`, `/voice status`
+- **Confirm-first UX** — voice transcriptions shown for confirmation before sending (or auto-send mode)
 
 ## Supported CLIs
 
@@ -44,7 +80,7 @@ Chati bridges your favorite messaging app to AI coding CLIs (Kiro, Claude Code, 
 | Gemini | `gemini` | `-p` | `gemini auth` on machine | [Setup Gemini](docs/setup-gemini.md) |
 | Codex | `codex` | `exec` | `codex login` on machine | [Setup Codex](docs/setup-codex.md) |
 
-> **Note:** All CLIs authenticate via browser login on the machine where Chati runs. Install the CLI, login once, and Chati uses that local session. No API keys needed.
+> **Note:** All CLIs authenticate via browser login on the machine where Chati runs. Install the CLI, login once, and Chati uses that local session. No API keys needed for the CLI itself.
 
 ## Prerequisites
 
@@ -102,6 +138,7 @@ If you prefer to configure manually:
 ### 1. Create a chat bot
 
 Currently supports Telegram. Create a bot via [@BotFather](https://t.me/BotFather):
+
 1. Open Telegram, find `@BotFather`
 2. Send `/newbot`, set name and username
 3. Copy the **BOT_TOKEN**
@@ -156,13 +193,25 @@ pip install -r requirements.txt
 | Command | Description |
 | ------- | ----------- |
 | `/start` | Show welcome message |
-| `/help` | Usage guide |
-| `/model` | Select AI model (inline keyboard) |
-| `/skills` | List available BMAD skills |
-| `/status` | Check CLI availability |
+| `/help` | Full command reference |
+| `/new` | Start fresh session (kills current) |
 | `/cancel` | Kill running CLI process |
-| `/new` | Reset session for current thread |
 | `/resume` | Resume previous session |
+| `/info` | Current session details (project, model, status, voice) |
+| `/sessions` | List all active sessions across threads |
+| `/model` | Select AI model (inline keyboard) |
+| `/project <path>` | Bind thread to a project directory |
+| `/projects` | Browse and switch between previous projects |
+| `/provider <name>` | Switch CLI provider for this thread |
+| `/voice` | Toggle voice output on/off |
+| `/voice status` | Show voice configuration for this thread |
+| `/voice speed 1.5` | Set TTS playback speed (0.25–4.0) |
+| `/git` | Git info — branch, log, status, diff |
+| `/git log` | Last 15 commits (graph) |
+| `/git status` | Working tree status |
+| `/git diff` | Unstaged changes (stat) |
+| `/status` | CLI health check |
+| `/skills` | List available BMAD workflows |
 
 ### Chat
 
@@ -178,6 +227,32 @@ Chati: [streaming response from CLI]
 - First message in a thread → new session
 - Subsequent messages → auto-resume conversation
 - `/new` in a thread → reset that thread's session
+- Different threads can use different projects, providers, and models
+
+### Decision forwarding
+
+When the CLI asks a question (Y/n, file selection, etc.), Chati forwards it to you:
+
+```text
+Chati: ⚠️ CLI is waiting for input
+       > Apply changes to 3 files? [Y/n]
+       Reply to proceed, or /cancel to abort.
+
+You: Y
+
+Chati: [continues streaming CLI output]
+```
+
+### Voice
+
+Send a voice message → Chati transcribes it and shows a confirmation keyboard:
+
+```text
+🎤 Transcription: "check the test results"
+[✅ Send] [✏️ Edit] [🗑️ Cancel]
+```
+
+Responses are read aloud (when voice output is enabled and response isn't code-heavy).
 
 ### BMAD skills
 
@@ -185,6 +260,31 @@ Chati: [streaming response from CLI]
 /bmad-sprint-status
 /bmad-create-prd
 /bmad-code-review
+```
+
+## Voice Configuration
+
+Voice works out of the box with **zero configuration** using free local backends:
+
+| Feature | With `OPENAI_API_KEY` | Without (free) |
+| ------- | -------------------- | -------------- |
+| Transcription | OpenAI Whisper (cloud) | faster-whisper (local CPU) |
+| TTS | OpenAI TTS (cloud) | edge-tts (Microsoft Edge, free) |
+| Quality | Higher | Good |
+| Cost | Per-token | Free |
+| Latency | ~1-2s | ~1-3s |
+
+Optional `.env` settings:
+
+```env
+# Voice (all optional — works without any of these)
+OPENAI_API_KEY=sk-...              # Enables cloud backends (higher quality)
+VOICE_OUTPUT_ENABLED=true          # Global default for voice output
+VOICE_AUTO_SEND=false              # Skip confirm keyboard for voice input
+TTS_SPEED=1.5                      # Default TTS speed (0.25–4.0)
+TTS_VOICE=coral                    # OpenAI voice: alloy, ash, coral, echo, fable, nova, onyx, sage, shimmer
+TTS_LOCAL_VOICE=vi-VN-HoaiMyNeural # edge-tts voice (when no API key)
+WHISPER_LOCAL_MODEL=base           # faster-whisper model: tiny, base, small
 ```
 
 ## Adding a new CLI provider
@@ -212,13 +312,39 @@ class MyCLIProvider(CliProvider):
         return env
 ```
 
-Then set `CLI_PROVIDER=mycli` in `.env`. No other changes needed.
+Then set `CLI_PROVIDER=mycli` in `.env`. No other changes needed — auto-discovered on startup.
+
+## Architecture
+
+```text
+Telegram User
+  → python-telegram-bot (async handlers)
+    → SessionManager (per-thread PTY pool)
+      → CliProvider.build_args() → PTY subprocess (streaming)
+        → strip ANSI → extract response → MD→HTML → Telegram reply
+        → detect screenshots → send photos
+        → detect decisions → forward to user → pipe reply back
+        → is_code_heavy? → TTS synthesis → send voice message
+```
+
+Key modules:
+
+| File | Responsibility |
+| ---- | -------------- |
+| `chati.py` | Telegram handlers, command routing, streaming orchestration |
+| `session_manager.py` | PTY session pool, state machine, idle cleanup |
+| `cli_runner.py` | Subprocess wrapper, streaming, model listing |
+| `db.py` | SQLite persistence, schema migration, config resolution |
+| `config.py` | Environment configuration (frozen dataclass) |
+| `message_utils.py` | ANSI strip, MD→HTML, message splitting, code detection |
+| `voice.py` | Whisper transcription + TTS synthesis (dual-backend) |
+| `cli_providers/` | Pluggable CLI drivers (auto-discovered) |
 
 ## Limitations
 
 - Telegram message limit: 4096 chars (auto-split for longer output)
-- Single project directory per bot instance
-- Only one bot instance can poll the same token at a time
+- Single bot instance per Telegram token (409 Conflict otherwise)
+- Voice speed control only works with OpenAI TTS backend (edge-tts uses fixed rate mapping)
 
 ## License
 

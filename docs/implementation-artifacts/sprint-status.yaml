@@ -1,0 +1,71 @@
+# Chati v2.0 — Sprint Status
+# Generated: 2026-05-06
+# 
+# STATUS DEFINITIONS:
+#   backlog        — not started, waiting in queue
+#   ready-for-dev  — story file created, ready for implementation
+#   in-progress    — currently being implemented
+#   review         — implementation complete, under review
+#   done           — reviewed, merged, verified
+#
+# EPIC STATUS:
+#   backlog        — no stories started
+#   in-progress    — at least one story started
+#   done           — all stories complete
+
+project: Chati v2.0
+last_updated: 2026-05-08
+# 2026-05-08: 6-3-voice-configuration → in-progress
+# 2026-05-08: 6-1-voice-input-whisper → in-progress
+# 2026-05-08: 6-1-voice-input-whisper → review
+# 2026-05-08: 6-2-voice-output-tts → in-progress
+# 2026-05-08: 6-2-voice-output-tts → review
+# 2026-05-08: 6-3-voice-configuration → review
+
+development_status:
+  # Epic 0: Test Infrastructure (Foundation)
+  epic-0: done
+  0-1-test-infrastructure: done
+
+  # Epic 1: SQLite Persistence & Multi-Project Foundation
+  epic-1: done
+  1-1-sqlite-database-layer: done
+  1-2-thread-to-project-binding: done
+  1-3-project-history-quick-rebinding: done
+  1-4-per-thread-provider-switching: done
+  1-5-configuration-resolution-chain: done
+  1-6-project-dir-per-thread-binding-fix: done
+
+  # Epic 2: Adaptive Timeout & Reliable Streaming
+  epic-2: done
+  2-1-session-manager-extraction: done
+  2-2-concurrent-session-pool: done
+  2-3-adaptive-timeout: done
+  2-4-session-operations: done
+  2-5-streaming-progressive-edits: done
+  2-6-idle-cleanup-status-reporting: done
+  2-7-cancel-cancels-running-task-fix: done
+  2-8-strip-spinner-noise-fix: done
+
+  # Epic 3: Interactive Decision Forwarding
+  epic-3: done
+  3-1-decision-prompt-detection: done
+  3-2-decision-prompt-forwarding: done
+  3-3-decision-reply-piping: done
+  3-4-decision-reply-timeout: done
+
+  # Epic 4: CLI Information & Session Visibility
+  epic-4: done
+  4-1-cli-info-command: done
+  4-2-session-list-command: done
+  4-3-enhanced-status-help: done
+
+  # Epic 5: Screenshot Forwarding (Growth)
+  epic-5: done
+  5-1-screenshot-detection-forwarding: done
+
+  # Epic 6: Voice Communication (Growth)
+  epic-6: done
+  6-1-voice-input-whisper: done
+  6-2-voice-output-tts: done
+  6-3-voice-configuration: done

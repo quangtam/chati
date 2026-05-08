@@ -27,6 +27,104 @@ def strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
+# ── Streaming noise filter ───────────────────────────────────────
+
+# Braille spinner characters commonly used by CLIs (Kiro, npm, etc.)
+# Unicode range U+2800–U+28FF covers all braille patterns.
+_BRAILLE_SPINNER_RE = re.compile(r"[\u2800-\u28FF]")
+
+# Lines that are pure CLI spinner/thinking frames (to be removed entirely).
+_SPINNER_LINE_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"[\u2800-\u28FF]+[ \t]*(?:Thinking|Loading|Waiting|Processing|Working)?[.\u2026]{0,}"
+    r"|[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)[.\u2026]{2,}"
+    r"|Thinking[.\u2026]{2,}"
+    r"|Loading[.\u2026]{2,}"
+    r"|\.{3,}"
+    r"|\u2026+"  # ellipsis char
+    r")[ \t]*$"
+)
+
+# Tool invocation lines that appear in streaming output (early pattern for strip_streaming_noise).
+# Full _TOOL_LINE_RE is defined later with more patterns; this covers the most common ones.
+_TOOL_STREAM_LINE_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"(?:Reading|Writing|Executing|Searching|Listing|Creating|Deleting|Updating|Running|Spawning|Invoking) (?:directory|file|command|shell|for|in|to):.*"
+    r"|Invoked\s+.*"
+    r"|Spawn(?:ed|ing)\s+.*"
+    r"|Successfully (?:read|wrote|created|deleted|updated|executed).*"
+    r"|Found \d+ (?:results?|files?|matches?).*"
+    r"|- Completed in [\d.]+s.*"
+    r"|\(using tool:.*\)"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def _collapse_carriage_returns(line: str) -> str:
+    """Keep only the text after the LAST \\r on each line.
+
+    Spinner animation writes like "\\r⠋ Thinking...\\r⠙ Thinking..."
+    collapse to just the final frame.
+    """
+    if "\r" not in line:
+        return line
+    # Split on \r; the last non-empty segment is what the terminal would show
+    segments = line.split("\r")
+    # Keep the last non-empty segment; if all empty, return empty
+    for seg in reversed(segments):
+        if seg:
+            return seg
+    return ""
+
+
+def strip_streaming_noise(text: str) -> str:
+    """Clean a streaming chunk for live preview display.
+
+    Handles:
+    - Carriage-return overwrites (\\r) — collapses to final frame per line
+    - Braille spinner frames (⠋⠙⠹...) — removes full spinner-only lines
+    - "Thinking..." / "Loading..." animation lines — removes them
+    - Bare ellipsis lines (... or …) — removes them
+    - Tool invocation lines (Searching for:, Reading file:, etc.) — removes them
+
+    Preserves real content including lines that end with "..." mid-sentence.
+
+    Safe to call on streaming chunks (doesn't require full output).
+    """
+    # Split into lines, collapse CR per-line, filter spinner-only lines
+    out_lines: list[str] = []
+    for raw in text.split("\n"):
+        line = _collapse_carriage_returns(raw)
+        if _SPINNER_LINE_RE.match(line):
+            continue
+        if _TOOL_STREAM_LINE_RE.match(line):
+            continue
+        # Strip braille spinner chars only if the line looks like a spinner
+        # (contains braille + optional spinner keywords). Preserve braille in
+        # real content (accessibility docs, Unicode art, etc.)
+        if _BRAILLE_SPINNER_RE.search(line):
+            # Only strip if line is mostly braille + whitespace + spinner words
+            without_braille = _BRAILLE_SPINNER_RE.sub("", line).strip()
+            spinner_words = {"thinking", "loading", "waiting", "processing", "working"}
+            if not without_braille or without_braille.lower().rstrip(".…") in spinner_words:
+                continue  # Pure spinner line — drop entirely
+            # Line has braille prefix followed by real content (e.g. "⠴ Thinking...> response")
+            # Strip the braille+spinner prefix, keep the rest
+            line = re.sub(
+                r"^[\u2800-\u28FF]+\s*(?:Thinking|Loading|Waiting|Processing|Working)?[.\u2026]*\s*",
+                "",
+                line,
+            ).strip()
+            if not line:
+                continue
+        # After stripping spinner prefix, check again for tool lines
+        if _TOOL_STREAM_LINE_RE.match(line):
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
 # ── Telegram Message Limits ──────────────────────────────────────
 
 MAX_MESSAGE_LENGTH = 4096
@@ -277,7 +375,9 @@ _TRUST_WARNING_RE = re.compile(
 # Credits/time footer: Credits: 0.15 • Time: 11s (with possible unicode chars)
 _CREDITS_RE = re.compile(r"^.*Credits:.*Time:.*$", re.MULTILINE)
 
-# Tool invocation lines — comprehensive patterns for kiro-cli output
+# Tool invocation lines — patterns for CLI tool-call noise (not spinners).
+# NOTE: spinner/Thinking/ellipsis patterns are handled by strip_streaming_noise()
+# which runs BEFORE this regex in extract_final_response(). Don't duplicate them here.
 _TOOL_LINE_PATTERNS = [
     r"Reading (?:directory|file):.*",
     r"Writing (?:file|to):.*",
@@ -295,8 +395,6 @@ _TOOL_LINE_PATTERNS = [
     r"Successfully (?:read|wrote|created|deleted|updated|executed).*",
     r"Found \d+ (?:results?|files?|matches?).*",
     r"- Completed in [\d.]+s.*",
-    r"Thinking\.{2,}",
-    r"\.{3,}\s*",  # Bare ellipsis (thinking indicator)
     r"\(using tool:.*\)",
 ]
 
@@ -328,7 +426,11 @@ def extract_final_response(text: str) -> str:
     invocations) and return everything from there. Falls back to
     regex-based filtering if no "> " marker is found.
     """
-    # Remove cursor junk and residual control chars first
+    # First pass: collapse carriage returns and strip spinner frames.
+    # This handles animation noise regardless of which strategy runs below.
+    text = strip_streaming_noise(text)
+
+    # Remove cursor junk and residual control chars
     text = _CURSOR_JUNK_RE.sub("", text)
 
     # Strategy 1: Find the "> " response marker.
@@ -375,13 +477,22 @@ def extract_final_response(text: str) -> str:
 def format_output(text: str, is_error: bool = False) -> str:
     """Format CLI output for Telegram display.
 
-    Pipeline: strip ANSI → extract final response → convert MD → HTML.
+    Pipeline: strip ANSI → extract final response → strip noise → convert MD → HTML.
     """
     # Strip ANSI escape codes
     text = strip_ansi(text)
 
     # Extract only the final response (remove thinking, tools, etc.)
     text = extract_final_response(text)
+
+    # Second noise pass — catches any spinner lines or tool invocation lines
+    # that survived inside the response block (e.g. Kiro emitting ⠴ Thinking…
+    # or tool lines after the "> " marker).
+    lines = [
+        l for l in text.split("\n")
+        if not _SPINNER_LINE_RE.match(l) and not _TOOL_LINE_RE.match(l)
+    ]
+    text = "\n".join(lines)
 
     # Collapse excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -395,3 +506,99 @@ def format_output(text: str, is_error: bool = False) -> str:
     if is_error:
         return f"❌ <b>Error:</b>\n\n{text}"
     return text.strip()
+
+
+# ── Code-Heavy Detection (Story 6.2 / hardened in 6.3) ───────────
+
+# Matches fenced code blocks with optional language specifier.
+# Non-greedy so multiple blocks are matched individually.
+# Does NOT match inline code (single backticks).
+_CODE_BLOCK_PATTERN = re.compile(
+    r"```(?:[a-zA-Z0-9_+-]*\n)?([\s\S]*?)```",
+    re.MULTILINE,
+)
+
+
+def is_code_heavy(text: str, threshold: float = 0.5) -> bool:
+    """Determine if text is code-heavy (>threshold ratio of code block content).
+
+    Only fenced code blocks (triple backtick) are counted. Inline code
+    (single backtick) is NOT counted. The ratio is calculated on the
+    CONTENT inside code blocks, excluding the ``` delimiters themselves.
+
+    Operates on raw markdown (before HTML conversion) so delimiters are
+    still present.
+
+    Args:
+        text: The response text to analyze (raw markdown).
+        threshold: Ratio above which response is considered code-heavy (default 0.5).
+
+    Returns:
+        True if code block content characters exceed threshold of total characters.
+    """
+    if not text or len(text) < 6:  # Minimum viable code block: ```\n```
+        return False
+
+    total_chars = len(text)
+    # group(1) is the content captured between the opening and closing ```
+    code_content_chars = sum(len(m.group(1)) for m in _CODE_BLOCK_PATTERN.finditer(text))
+
+    return (code_content_chars / total_chars) > threshold
+
+
+# ── Screenshot Detection (Story 5.1) ─────────────────────────────
+
+# URLs we must NOT treat as local file paths — strip these before detection.
+_URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+
+# Absolute paths: must start with `/`
+# Relative paths: must start with `./`
+# Supported extensions: png, jpg, jpeg, gif, webp (case-insensitive)
+# Path characters: exclude whitespace and common string delimiters that
+# would end a path token in CLI output.
+_SCREENSHOT_PATTERN = re.compile(
+    r"""
+    (?<![A-Za-z0-9])  # not preceded by alphanumeric (avoids partial matches inside words)
+    (
+        /[^\s'"<>|()\[\]]+\.(?:png|jpg|jpeg|gif|webp)    # absolute path
+        |
+        \.\/[^\s'"<>|()\[\]]+\.(?:png|jpg|jpeg|gif|webp) # relative ./path
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def detect_screenshots(text: str) -> list[str]:
+    """Extract image file paths from CLI output text.
+
+    Scans for absolute paths (starting with `/`) or relative paths
+    (starting with `./`) ending in supported image extensions:
+    ``.png``, ``.jpg``, ``.jpeg``, ``.gif``, ``.webp``.
+
+    URLs (``http://`` / ``https://``) are explicitly excluded.
+
+    Args:
+        text: Raw CLI output text (ANSI sequences will be stripped).
+
+    Returns:
+        List of detected file path strings in order of first appearance.
+        Duplicates are removed. Empty list if no image paths found.
+    """
+    if not text:
+        return []
+
+    # Strip ANSI sequences — paths may be embedded in color codes.
+    cleaned = strip_ansi(text)
+
+    # Remove URLs first so their path components are not misread as local files.
+    cleaned = _URL_PATTERN.sub(" ", cleaned)
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for match in _SCREENSHOT_PATTERN.finditer(cleaned):
+        path = match.group(1)
+        if path not in seen:
+            seen.add(path)
+            ordered.append(path)
+    return ordered

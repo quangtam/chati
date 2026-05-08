@@ -3,3 +3,13 @@ python-telegram-bot==21.10
 
 # Environment variables
 python-dotenv==1.1.0
+
+# Async SQLite (v2.0)
+aiosqlite>=0.20.0
+
+# Voice transcription (v2.0 Growth)
+# OpenAI backend (cloud, requires OPENAI_API_KEY):
+openai>=1.0.0
+# Local backend (free, no API key needed):
+faster-whisper>=1.0.0
+edge-tts>=6.1.0

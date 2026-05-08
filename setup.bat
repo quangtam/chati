@@ -140,31 +140,71 @@ if not exist "%PROJECT_DIR%" (
 echo [OK] Project: %PROJECT_DIR%
 echo.
 
-:: ── Step 7: Write .env ─────────────────────────────────────────
+:: ── Step 7: Voice features ──────────────────────────────────────
 
+echo Voice Features (optional)
+echo.
+echo   Voice lets you send voice messages to the bot (transcribed to text)
+echo   and optionally receive responses as audio.
+echo.
+echo   Two backends available:
+echo     Free (no API key): faster-whisper (local) + edge-tts (Microsoft)
+echo     Premium (OpenAI):  Whisper API + TTS API (higher quality, costs money)
+echo.
+echo   Voice works out of the box with the free backend.
+echo   To use OpenAI, enter your API key below (or leave blank).
+echo.
+set /p OPENAI_API_KEY="OpenAI API key (leave blank for free local backend): "
+echo.
+
+if not "%OPENAI_API_KEY%"=="" (
+    echo [OK] OpenAI backend selected (Whisper + TTS)
+) else (
+    echo [OK] Free local backend selected (faster-whisper + edge-tts)
+    echo [*]  faster-whisper 'base' model will download on first voice message (~140MB)
+)
+echo.
+
+:: ── Step 8: Write .env ─────────────────────────────────────────
+
+set WRITE_ENV=y
 if exist ".env" (
     set /p OVERWRITE="[WARN] .env already exists. Overwrite? [y/N]: "
     if /i not "!OVERWRITE!"=="y" (
         echo [*] Keeping existing .env
-        goto :done
+        set WRITE_ENV=n
     )
 )
 
-(
-    echo TELEGRAM_BOT_TOKEN=%BOT_TOKEN%
-    echo ALLOWED_USER_IDS=%USER_IDS%
-    echo CLI_PROVIDER=%CLI_PROVIDER%
-    echo PROJECT_DIR=%PROJECT_DIR%
-    echo CLI_TIMEOUT=300
-    echo CLI_TRUST_ALL_TOOLS=true
-    echo LOG_LEVEL=INFO
-) > .env
+if /i "%WRITE_ENV%"=="y" (
+    (
+        echo TELEGRAM_BOT_TOKEN=%BOT_TOKEN%
+        echo ALLOWED_USER_IDS=%USER_IDS%
+        echo CLI_PROVIDER=%CLI_PROVIDER%
+        echo PROJECT_DIR=%PROJECT_DIR%
+        echo CLI_TIMEOUT=300
+        echo CLI_TRUST_ALL_TOOLS=true
+        echo LOG_LEVEL=INFO
+    ) > .env
 
-echo [OK] .env created
+    if not "%OPENAI_API_KEY%"=="" (
+        echo. >> .env
+        echo # Voice features -- OpenAI backend >> .env
+        echo OPENAI_API_KEY=%OPENAI_API_KEY% >> .env
+    ) else (
+        echo. >> .env
+        echo # Voice features -- free local backend (faster-whisper + edge-tts) >> .env
+        echo # Uncomment OPENAI_API_KEY to switch to OpenAI cloud backend: >> .env
+        echo # OPENAI_API_KEY=your-key-here >> .env
+        echo WHISPER_LOCAL_MODEL=base >> .env
+        echo TTS_LOCAL_VOICE=vi-VN-HoaiMyNeural >> .env
+    )
+
+    echo [OK] .env created
+)
 
 :: ── Done ────────────────────────────────────────────────────────
 
-:done
 echo.
 echo ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo   Chati is ready!
@@ -179,10 +219,14 @@ echo.
 echo   Then start Chati:
 echo     chati start
 echo.
+echo   Voice commands (in Telegram):
+echo     Send a voice message  -- bot transcribes and confirms
+echo     /voice                -- toggle voice responses on/off
+echo.
 echo   Other commands:
-echo     chati stop       # stop
-echo     chati restart    # restart
-echo     chati status     # check status
-echo     chati log        # view logs
+echo     chati stop       -- stop
+echo     chati restart    -- restart
+echo     chati status     -- check status
+echo     chati log        -- view logs
 echo.
 pause

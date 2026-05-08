@@ -6,3 +6,19 @@ bot.log
 .chati.pid
 .bot.pid
 .venv/
+
+# Runtime artifacts
+chati.db
+chati.db-shm
+chati.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# BMad installed skills (local tooling, like .venv)
+.kiro/skills/
