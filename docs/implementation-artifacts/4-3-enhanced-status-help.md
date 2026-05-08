@@ -1,6 +1,6 @@
 # Story 4.3: Enhanced Status & Help Commands
 
-Status: review
+Status: done
 
 ## Story
 

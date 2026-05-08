@@ -1,6 +1,6 @@
 # Story 5.1: Screenshot Detection & Inline Photo Forwarding
 
-Status: review
+Status: done
 
 ## Story
 
@@ -36,6 +36,15 @@ So that I can see visual proof of task completion without opening my laptop.
 - [x] Task 2: Create `_send_screenshots()` helper in `chati.py`
 - [x] Task 3: Integrate screenshot sending into `_execute_and_reply_inner()` and `_stream_to_telegram()`
 - [x] Task 4: Write tests in `tests/test_screenshot_forwarding.py`
+
+### Review Follow-ups (AI)
+
+- [x] [Review][Decision] Raw output scope — detect_screenshots runs on full raw CLI output including tool invocation logs; paths mentioned in tool logs (not just final response) get forwarded as photos. Decide: scope detection to `extract_final_response(output)` or keep raw? [chati.py:1185,1366] — **Fixed: scoped to `extract_final_response(output) or output`**
+- [x] [Review][Decision] Rate limiting — no delay between multiple photo sends; story dev notes flagged this (#6) but implementation omitted it. Decide: add 0.5s `asyncio.sleep` between sends, or defer? [chati.py:_send_screenshots loop] — **Fixed: added `asyncio.sleep(0.5)` between sends**
+- [x] [Review][Patch] OSError branches untested — `except OSError` on `os.path.isfile()` (lines 1433-1435) and `os.path.getsize()` (lines 1440-1442) have zero test coverage; violates AC5 ≥80% branch coverage [chati.py:1433-1442] — **Fixed: added `test_isfile_oserror_skipped` and `test_getsize_oserror_skipped`**
+- [x] [Review][Patch] Document send failure path untested — `reply_document` raising an exception is not covered; only `reply_photo` failure is tested [chati.py:1474-1476] — **Fixed: added `test_reply_document_api_failure_graceful`**
+- [x] [Review][Defer] Caption HTML escaping — `f"📸 {filename}"` unescaped; benign today (no parse_mode), brittle if parse_mode added later [chati.py:1451] — deferred, pre-existing pattern
+- [x] [Review][Defer] Extra DB call in `_stream_to_telegram` — calls `db.resolve_thread_config` just to get `project_dir`; minor perf nit, not a correctness issue [chati.py:1188-1197] — deferred, pre-existing pattern
 
 ## Dev Agent Record
 

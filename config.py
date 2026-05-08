@@ -41,6 +41,23 @@ class Config:
     decision_idle_threshold: int = 12  # seconds before checking for prompt
     decision_reply_timeout: int = 1800  # 30min for user to reply to decision
 
+    # v2.0 Growth: Voice features
+    openai_api_key: str = ""  # Optional — if empty, local backends are used
+    voice_enabled: bool = True   # Always enabled; backends auto-selected
+    whisper_model: str = "gpt-4o-mini-transcribe"  # OpenAI model (when key present)
+    whisper_timeout: int = 10
+    whisper_local_model: str = "base"  # faster-whisper model: tiny/base/small
+
+    # v2.0 Growth: TTS (voice output)
+    tts_model: str = "gpt-4o-mini-tts"   # OpenAI model (when key present)
+    tts_voice: str = "coral"              # OpenAI voice
+    tts_speed: float = 1.5               # Playback speed: 0.25–4.0 (1.0 = normal)
+    tts_timeout: int = 10
+    tts_local_voice: str = "vi-VN-HoaiMyNeural"  # edge-tts voice (when no key)
+    tts_local_rate: str = "+30%"         # edge-tts rate: +30% = 1.3x speed
+    voice_output_enabled: bool = False    # Per-user default (toggle via /voice)
+    voice_auto_send: bool = False         # Skip confirm — transcribe and send immediately
+
     @classmethod
     def from_env(cls) -> "Config":
         token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -84,6 +101,25 @@ class Config:
         if not Path(project_dir).is_dir():
             raise ValueError(f"PROJECT_DIR does not exist: {project_dir}")
 
+        # Voice (v2.0 Growth) — auto-select backend based on API key presence.
+        # If OPENAI_API_KEY is set → use OpenAI cloud (Whisper + TTS).
+        # Otherwise → use local backends (faster-whisper + edge-tts), no cost.
+        openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        voice_enabled = True  # Always enabled — backend chosen automatically
+        whisper_model = os.getenv("WHISPER_MODEL", "gpt-4o-mini-transcribe")
+        whisper_timeout = int(os.getenv("WHISPER_TIMEOUT", "10"))
+        whisper_local_model = os.getenv("WHISPER_LOCAL_MODEL", "base")
+
+        # TTS (voice output)
+        tts_model = os.getenv("TTS_MODEL", "gpt-4o-mini-tts")
+        tts_voice = os.getenv("TTS_VOICE", "coral")
+        tts_speed = float(os.getenv("TTS_SPEED", "1.5"))
+        tts_timeout = int(os.getenv("TTS_TIMEOUT", "10"))
+        tts_local_voice = os.getenv("TTS_LOCAL_VOICE", "vi-VN-HoaiMyNeural")
+        tts_local_rate = os.getenv("TTS_LOCAL_RATE", "+30%")
+        voice_output_enabled = os.getenv("VOICE_OUTPUT_ENABLED", "false").lower() == "true"
+        voice_auto_send = os.getenv("VOICE_AUTO_SEND", "false").lower() == "true"
+
         return cls(
             telegram_token=token,
             allowed_user_ids=allowed,
@@ -103,4 +139,17 @@ class Config:
             cleanup_interval=int(os.getenv("CLEANUP_INTERVAL", "300")),
             decision_idle_threshold=int(os.getenv("DECISION_IDLE_THRESHOLD", "12")),
             decision_reply_timeout=int(os.getenv("DECISION_REPLY_TIMEOUT", "1800")),
+            openai_api_key=openai_api_key,
+            voice_enabled=voice_enabled,
+            whisper_model=whisper_model,
+            whisper_timeout=whisper_timeout,
+            whisper_local_model=whisper_local_model,
+            tts_model=tts_model,
+            tts_voice=tts_voice,
+            tts_speed=tts_speed,
+            tts_timeout=tts_timeout,
+            tts_local_voice=tts_local_voice,
+            tts_local_rate=tts_local_rate,
+            voice_output_enabled=voice_output_enabled,
+            voice_auto_send=voice_auto_send,
         )

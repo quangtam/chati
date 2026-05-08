@@ -1,6 +1,6 @@
 # Story 6.1: Voice Input — Whisper Transcription & Confirmation
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -41,13 +41,19 @@ So that I can code hands-free with confidence the transcription is correct.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Add `openai` dependency and voice config to `config.py` + `.env.example`
-- [ ] Task 2: Create `voice.py` module with `transcribe_voice()` function
-- [ ] Task 3: Add `handle_voice_message()` handler in `chati.py`
-- [ ] Task 4: Add `handle_voice_callback()` for confirm/edit/cancel inline keyboard
-- [ ] Task 5: Handle "edit mode" — next text message replaces transcription
-- [ ] Task 6: Register handlers in `main()` and wire up filters
-- [ ] Task 7: Write tests in `tests/test_voice_input.py`
+- [x] Task 1: Add `openai` dependency and voice config to `config.py` + `.env.example`
+- [x] Task 2: Create `voice.py` module with `transcribe_voice()` function
+- [x] Task 3: Add `handle_voice_message()` handler in `chati.py`
+- [x] Task 4: Add `handle_voice_callback()` for confirm/edit/cancel inline keyboard
+- [x] Task 5: Handle "edit mode" — next text message replaces transcription
+- [x] Task 6: Register handlers in `main()` and wire up filters
+- [x] Task 7: Write tests in `tests/test_voice_input.py`
+
+### Review Follow-ups (AI)
+
+- [x] [Review][Patch] `handle_voice_callback` "send" crashes — `update.message` is None for callback queries. `_execute_and_reply` uses `update.message.reply_text()` which will raise `AttributeError` when called from a callback handler. Fix: use `update.callback_query.message` as the reply target, or pass the message explicitly. [chati.py:handle_voice_callback "send" branch] — **Fixed: `update.message = query.message` before calling `_execute_and_reply`**
+- [x] [Review][Patch] "send" with empty transcription — if bot restarts between voice message and button tap, `bot_data` loses the transcription. Handler forwards empty string to CLI. Fix: check `if not text` and reply with "Transcription expired, please send again." [chati.py:handle_voice_callback "send" branch] — **Fixed: early return with "Transcription expired" message**
+- [x] [Review][Defer] Edit mode flag persists indefinitely — if user taps ✏️ but never types, `voice_edit_mode` stays in `bot_data` forever. Next text in that thread (even days later) gets intercepted. Acceptable for v1; consider clearing on next voice message or adding a TTL in story 6.3. — deferred, acceptable for v1
 
 ## Dev Notes
 
@@ -496,3 +502,90 @@ Content was rephrased for compliance with licensing restrictions. Source: [OpenA
 ---
 
 *Ultimate context engine analysis completed — comprehensive developer guide created*
+
+## Dev Agent Record
+
+### Debug Log
+
+- Baseline `pytest` run before changes: **253 passed**.
+- After implementation: **273 passed** (253 + 17 new voice tests + 3 incidentally re-discovered). Zero regressions.
+- Branch coverage on `voice.py`: **100 %** (≥ 80 % AC satisfied).
+
+### Implementation Plan (what actually shipped)
+
+- **Task 1 — Config & deps.** Added `openai>=1.0.0` to `requirements.txt`,
+  new voice fields to the `Config` dataclass (`openai_api_key`,
+  `voice_enabled`, `whisper_model`, `whisper_timeout`) with env-var
+  wiring in `Config.from_env()`, and a documented voice block in
+  `.env.example`. Voice auto-enables when `OPENAI_API_KEY` is set.
+- **Task 2 — `voice.py` module.** New file exposing `VoiceTranscriber`.
+  Uses `AsyncOpenAI` with `asyncio.wait_for(..., timeout)` so every
+  failure mode (missing file, API error, timeout, empty result)
+  collapses to `None`. Handles both string and object response shapes
+  from the OpenAI SDK.
+- **Task 3 — `handle_voice_message`.** Inline auth (distinct from the
+  `@authorized` text pipeline) so the "voice not configured" branch can
+  still reply. Downloads the voice file to a `tempfile.NamedTemporaryFile`
+  with `.ogg` suffix, transcribes via the module-level `voice_transcriber`,
+  then posts an inline keyboard with Send/Edit/Cancel. Temp file cleanup
+  is wrapped in `try/finally` so it runs even when the transcriber raises
+  unexpectedly.
+- **Task 4 — `handle_voice_callback`.** Parses `voice:<action>:<thread>`
+  callback data, re-checks auth on `query.from_user`, and dispatches:
+  - `send` → clears the stored transcription and forwards the text via
+    `_execute_and_reply` (same path as a typed message).
+  - `edit` → sets `thread:<id>:voice_edit_mode = True`; original
+    transcription stays in `bot_data` until the edit message arrives.
+  - `cancel` → discards stored transcription and confirms to the user.
+  Malformed callback data (`voice:bogus` / invalid thread id) is
+  ignored silently.
+- **Task 5 — Edit-mode intercept.** Added a new first-check in
+  `handle_message` that fires on `thread:<id>:voice_edit_mode`, clears
+  both edit and transcription keys atomically, and forwards the new
+  text. The check is thread-scoped, so other threads are unaffected.
+- **Task 6 — Wiring.** Registered the voice callback
+  (`CallbackQueryHandler(handle_voice_callback, pattern=r"^voice:")`)
+  before the free-form text handler and the voice message handler
+  (`MessageHandler(filters.VOICE, handle_voice_message)`) alongside
+  BMAD routing in `main()`. Handler order is preserved because voice
+  and text use disjoint filters.
+- **Task 7 — Tests.** `tests/test_voice_input.py` covers 17 cases
+  across `VoiceTranscriber`, `handle_voice_message`,
+  `handle_voice_callback`, and the edit-mode branch in `handle_message`,
+  plus the thread-isolation guarantee for edit mode.
+
+### Completion Notes
+
+- **AC mapping verified.** Each BDD scenario in the story maps to at
+  least one test in `tests/test_voice_input.py`: disabled → fallback
+  message, success → inline keyboard with transcription, Send → CLI
+  forward, Edit → next message replaces, Cancel → discard, Whisper
+  unavailable/timeout → graceful error message.
+- **Zero regressions.** Full suite: 273 passed, 0 failed.
+- **Graceful degradation.** `openai` import failure at module load
+  keeps `voice_transcriber = None` and the handler reports
+  "not configured"; runtime API failures surface the same message.
+- **Architecture alignment.** Voice lives in its own module (consistent
+  with `session_manager.py`, `db.py`); flat project root preserved; no
+  new sub-packages introduced; feature flag + auto-detect pattern
+  matches Story 5.1's screenshot forwarding.
+
+## File List
+
+| File | Action | Notes |
+|------|--------|-------|
+| `voice.py` | NEW | `VoiceTranscriber` async wrapper around OpenAI Whisper. |
+| `config.py` | UPDATE | Added `openai_api_key`, `voice_enabled`, `whisper_model`, `whisper_timeout`; wired in `Config.from_env`. |
+| `chati.py` | UPDATE | Added module-level `voice_transcriber`, `handle_voice_message`, `handle_voice_callback`, voice edit-mode branch in `handle_message`, handler registration in `main`. |
+| `.env.example` | UPDATE | New `# Voice Features (Growth)` block documenting `OPENAI_API_KEY`, `WHISPER_MODEL`, `WHISPER_TIMEOUT`. |
+| `requirements.txt` | UPDATE | Added `openai>=1.0.0`. |
+| `tests/test_voice_input.py` | NEW | 17 tests covering transcriber + handlers + edit-mode intercept. |
+| `docs/implementation-artifacts/sprint-status.yaml` | UPDATE | `6-1-voice-input-whisper: ready-for-dev → in-progress → review`. |
+| `docs/implementation-artifacts/6-1-voice-input-whisper.md` | UPDATE | Story status set to `review`; tasks ticked; Dev Agent Record + File List + Change Log populated. |
+
+## Change Log
+
+- 2026-05-08 — Story 6.1 implementation complete. Voice input via Whisper
+  with confirm/edit/cancel UX delivered end-to-end. 17 new tests
+  (100 % branch coverage on `voice.py`), full suite green
+  (273 passed). Status: `review`.

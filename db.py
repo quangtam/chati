@@ -6,8 +6,8 @@ with WAL mode for concurrent-safe reads/writes.
 Schema:
     thread_config (
         thread_id INTEGER PK, project_dir TEXT NOT NULL,
-        cli_provider, model, timeout_seconds, last_active_at,
-        created_at, updated_at
+        cli_provider, model, timeout_seconds, voice_output,
+        last_active_at, created_at, updated_at
     )
 """
 
@@ -33,6 +33,8 @@ class ThreadConfig:
     cli_provider: str | None = None
     model: str | None = None
     timeout_seconds: int | None = None
+    voice_output: int | None = None  # NULL=use global default, 1=enabled, 0=disabled
+    tts_speed: float | None = None   # NULL=use global default, e.g. 1.5
     last_active_at: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
@@ -99,18 +101,49 @@ async def init_db(path: str = DB_PATH, default_project_dir: str = "") -> None:
                     f"[db] init_db: created default thread row with project_dir={default_project_dir}"
                 )
 
+        # v2.0 Growth: voice_output column (Story 6.3).
+        # ALTER TABLE ADD COLUMN is idempotent via try/except — SQLite has no
+        # "ADD COLUMN IF NOT EXISTS" syntax.
+        try:
+            await db.execute(
+                "ALTER TABLE thread_config ADD COLUMN voice_output INTEGER DEFAULT NULL"
+            )
+            logger.info("[db] init_db: added voice_output column")
+        except Exception:
+            pass  # Column already exists — expected on every startup after first run
+
+        # v2.0 Growth: tts_speed column (per-thread TTS speed override).
+        try:
+            await db.execute(
+                "ALTER TABLE thread_config ADD COLUMN tts_speed REAL DEFAULT NULL"
+            )
+            logger.info("[db] init_db: added tts_speed column")
+        except Exception:
+            pass  # Column already exists
+
 
 # ─── Repository functions ────────────────────────────────────────────────────
 
 
 def _row_to_config(row: aiosqlite.Row) -> ThreadConfig:
     """Convert SQLite Row to ThreadConfig dataclass."""
+    # voice_output and tts_speed may be absent on databases created before Story 6.3.
+    try:
+        voice_output = row["voice_output"]
+    except (IndexError, KeyError):
+        voice_output = None
+    try:
+        tts_speed = row["tts_speed"]
+    except (IndexError, KeyError):
+        tts_speed = None
     return ThreadConfig(
         thread_id=row["thread_id"],
         project_dir=row["project_dir"],
         cli_provider=row["cli_provider"],
         model=row["model"],
         timeout_seconds=row["timeout_seconds"],
+        voice_output=voice_output,
+        tts_speed=tts_speed,
         last_active_at=row["last_active_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -243,6 +276,7 @@ class ResolvedConfig:
     cli_provider: str
     model: str | None  # None if no model default — provider handles it
     timeout_seconds: int
+    voice_output: bool = False  # Resolved voice output preference (Story 6.3)
 
 
 async def resolve_thread_config(
@@ -252,6 +286,7 @@ async def resolve_thread_config(
     env_cli_provider: str,
     env_model: str | None = None,
     env_timeout_seconds: int = 600,
+    env_voice_output: bool = False,
     path: str = DB_PATH,
 ) -> ResolvedConfig:
     """Resolve thread configuration using 3-layer fallback chain.
@@ -267,6 +302,7 @@ async def resolve_thread_config(
         env_cli_provider: Default provider from .env (CLI_PROVIDER)
         env_model: Optional default model (no .env key by default)
         env_timeout_seconds: Default timeout from .env (CLI_TIMEOUT)
+        env_voice_output: Default voice output from .env (VOICE_OUTPUT_ENABLED)
         path: DB path (for testability)
 
     Returns:
@@ -279,11 +315,13 @@ async def resolve_thread_config(
         cli_provider = row.cli_provider or env_cli_provider
         model = row.model if row.model is not None else env_model
         timeout_seconds = row.timeout_seconds or env_timeout_seconds
+        voice_output = bool(row.voice_output) if row.voice_output is not None else env_voice_output
     else:
         project_dir = env_project_dir
         cli_provider = env_cli_provider
         model = env_model
         timeout_seconds = env_timeout_seconds
+        voice_output = env_voice_output
 
     return ResolvedConfig(
         thread_id=thread_id,
@@ -291,4 +329,68 @@ async def resolve_thread_config(
         cli_provider=cli_provider,
         model=model,
         timeout_seconds=timeout_seconds,
+        voice_output=voice_output,
     )
+
+
+async def upsert_voice_output(
+    thread_id: int, *, voice_output: bool, path: str = DB_PATH
+) -> None:
+    """Set voice_output preference for a thread (Story 6.3).
+
+    Only updates existing rows — voice toggle is only meaningful for threads
+    that have already been used (have a project_dir bound). Silently no-ops
+    for threads with no row yet.
+    """
+    async with get_db(path) as db:
+        cursor = await db.execute(
+            "SELECT thread_id FROM thread_config WHERE thread_id = ?", (thread_id,)
+        )
+        exists = await cursor.fetchone() is not None
+
+        if exists:
+            await db.execute(
+                "UPDATE thread_config SET voice_output = ?, updated_at = datetime('now') "
+                "WHERE thread_id = ?",
+                (1 if voice_output else 0, thread_id),
+            )
+            logger.debug(
+                "[db] upsert_voice_output: thread_id=%d voice_output=%s",
+                thread_id, voice_output,
+            )
+        else:
+            logger.debug(
+                "[db] upsert_voice_output: thread_id=%d has no row yet — skipping",
+                thread_id,
+            )
+
+
+async def upsert_tts_speed(
+    thread_id: int, *, tts_speed: float | None, path: str = DB_PATH
+) -> None:
+    """Set per-thread TTS speed override.
+
+    Pass ``tts_speed=None`` to clear the override and fall back to global config.
+    Only updates existing rows — silently no-ops for threads with no row yet.
+    """
+    async with get_db(path) as db:
+        cursor = await db.execute(
+            "SELECT thread_id FROM thread_config WHERE thread_id = ?", (thread_id,)
+        )
+        exists = await cursor.fetchone() is not None
+
+        if exists:
+            await db.execute(
+                "UPDATE thread_config SET tts_speed = ?, updated_at = datetime('now') "
+                "WHERE thread_id = ?",
+                (tts_speed, thread_id),
+            )
+            logger.debug(
+                "[db] upsert_tts_speed: thread_id=%d tts_speed=%s",
+                thread_id, tts_speed,
+            )
+        else:
+            logger.debug(
+                "[db] upsert_tts_speed: thread_id=%d has no row yet — skipping",
+                thread_id,
+            )

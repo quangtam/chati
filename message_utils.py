@@ -34,17 +34,30 @@ def strip_ansi(text: str) -> str:
 _BRAILLE_SPINNER_RE = re.compile(r"[\u2800-\u28FF]")
 
 # Lines that are pure CLI spinner/thinking frames (to be removed entirely).
-# Matches: "⠋ Thinking...", "⠙ Loading...", "/ Thinking", "- Waiting...",
-# "⠋", "Thinking...", "...", "…", optionally with leading/trailing whitespace.
 _SPINNER_LINE_RE = re.compile(
     r"^[ \t]*(?:"
-    r"[\u2800-\u28FF]+[ \t]*(?:Thinking|Loading|Waiting|Processing|Working)?\.{0,}"
-    r"|[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)\.{2,}"
-    r"|Thinking\.{2,}"
-    r"|Loading\.{2,}"
+    r"[\u2800-\u28FF]+[ \t]*(?:Thinking|Loading|Waiting|Processing|Working)?[.\u2026]{0,}"
+    r"|[|/\\\-][ \t]+(?:Thinking|Loading|Waiting|Processing|Working)[.\u2026]{2,}"
+    r"|Thinking[.\u2026]{2,}"
+    r"|Loading[.\u2026]{2,}"
     r"|\.{3,}"
     r"|\u2026+"  # ellipsis char
     r")[ \t]*$"
+)
+
+# Tool invocation lines that appear in streaming output (early pattern for strip_streaming_noise).
+# Full _TOOL_LINE_RE is defined later with more patterns; this covers the most common ones.
+_TOOL_STREAM_LINE_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"(?:Reading|Writing|Executing|Searching|Listing|Creating|Deleting|Updating|Running|Spawning|Invoking) (?:directory|file|command|shell|for|in|to):.*"
+    r"|Invoked\s+.*"
+    r"|Spawn(?:ed|ing)\s+.*"
+    r"|Successfully (?:read|wrote|created|deleted|updated|executed).*"
+    r"|Found \d+ (?:results?|files?|matches?).*"
+    r"|- Completed in [\d.]+s.*"
+    r"|\(using tool:.*\)"
+    r")$",
+    re.IGNORECASE,
 )
 
 
@@ -73,6 +86,7 @@ def strip_streaming_noise(text: str) -> str:
     - Braille spinner frames (⠋⠙⠹...) — removes full spinner-only lines
     - "Thinking..." / "Loading..." animation lines — removes them
     - Bare ellipsis lines (... or …) — removes them
+    - Tool invocation lines (Searching for:, Reading file:, etc.) — removes them
 
     Preserves real content including lines that end with "..." mid-sentence.
 
@@ -84,6 +98,8 @@ def strip_streaming_noise(text: str) -> str:
         line = _collapse_carriage_returns(raw)
         if _SPINNER_LINE_RE.match(line):
             continue
+        if _TOOL_STREAM_LINE_RE.match(line):
+            continue
         # Strip braille spinner chars only if the line looks like a spinner
         # (contains braille + optional spinner keywords). Preserve braille in
         # real content (accessibility docs, Unicode art, etc.)
@@ -91,9 +107,20 @@ def strip_streaming_noise(text: str) -> str:
             # Only strip if line is mostly braille + whitespace + spinner words
             without_braille = _BRAILLE_SPINNER_RE.sub("", line).strip()
             spinner_words = {"thinking", "loading", "waiting", "processing", "working"}
-            if not without_braille or without_braille.lower().rstrip(".") in spinner_words:
+            if not without_braille or without_braille.lower().rstrip(".…") in spinner_words:
                 continue  # Pure spinner line — drop entirely
-            # Otherwise keep the line as-is (real content with incidental braille)
+            # Line has braille prefix followed by real content (e.g. "⠴ Thinking...> response")
+            # Strip the braille+spinner prefix, keep the rest
+            line = re.sub(
+                r"^[\u2800-\u28FF]+\s*(?:Thinking|Loading|Waiting|Processing|Working)?[.\u2026]*\s*",
+                "",
+                line,
+            ).strip()
+            if not line:
+                continue
+        # After stripping spinner prefix, check again for tool lines
+        if _TOOL_STREAM_LINE_RE.match(line):
+            continue
         out_lines.append(line)
     return "\n".join(out_lines)
 
@@ -450,13 +477,22 @@ def extract_final_response(text: str) -> str:
 def format_output(text: str, is_error: bool = False) -> str:
     """Format CLI output for Telegram display.
 
-    Pipeline: strip ANSI → extract final response → convert MD → HTML.
+    Pipeline: strip ANSI → extract final response → strip noise → convert MD → HTML.
     """
     # Strip ANSI escape codes
     text = strip_ansi(text)
 
     # Extract only the final response (remove thinking, tools, etc.)
     text = extract_final_response(text)
+
+    # Second noise pass — catches any spinner lines or tool invocation lines
+    # that survived inside the response block (e.g. Kiro emitting ⠴ Thinking…
+    # or tool lines after the "> " marker).
+    lines = [
+        l for l in text.split("\n")
+        if not _SPINNER_LINE_RE.match(l) and not _TOOL_LINE_RE.match(l)
+    ]
+    text = "\n".join(lines)
 
     # Collapse excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -470,6 +506,44 @@ def format_output(text: str, is_error: bool = False) -> str:
     if is_error:
         return f"❌ <b>Error:</b>\n\n{text}"
     return text.strip()
+
+
+# ── Code-Heavy Detection (Story 6.2 / hardened in 6.3) ───────────
+
+# Matches fenced code blocks with optional language specifier.
+# Non-greedy so multiple blocks are matched individually.
+# Does NOT match inline code (single backticks).
+_CODE_BLOCK_PATTERN = re.compile(
+    r"```(?:[a-zA-Z0-9_+-]*\n)?([\s\S]*?)```",
+    re.MULTILINE,
+)
+
+
+def is_code_heavy(text: str, threshold: float = 0.5) -> bool:
+    """Determine if text is code-heavy (>threshold ratio of code block content).
+
+    Only fenced code blocks (triple backtick) are counted. Inline code
+    (single backtick) is NOT counted. The ratio is calculated on the
+    CONTENT inside code blocks, excluding the ``` delimiters themselves.
+
+    Operates on raw markdown (before HTML conversion) so delimiters are
+    still present.
+
+    Args:
+        text: The response text to analyze (raw markdown).
+        threshold: Ratio above which response is considered code-heavy (default 0.5).
+
+    Returns:
+        True if code block content characters exceed threshold of total characters.
+    """
+    if not text or len(text) < 6:  # Minimum viable code block: ```\n```
+        return False
+
+    total_chars = len(text)
+    # group(1) is the content captured between the opening and closing ```
+    code_content_chars = sum(len(m.group(1)) for m in _CODE_BLOCK_PATTERN.finditer(text))
+
+    return (code_content_chars / total_chars) > threshold
 
 
 # ── Screenshot Detection (Story 5.1) ─────────────────────────────

@@ -115,7 +115,7 @@ else
     case "$CLI_PROVIDER" in
         kiro)   echo "  Install: brew install --cask kiro-cli" ;;
         claude) echo "  Install: npm install -g @anthropic-ai/claude-code" ;;
-        gemini) echo "  Install: npm install -g @anthropic-ai/gemini-cli" ;;
+        gemini) echo "  Install: npm install -g @google/gemini-cli" ;;
         codex)  echo "  Install: npm install -g @openai/codex" ;;
     esac
     echo "  Then re-run: bash setup.sh"
@@ -170,19 +170,44 @@ fi
 ok "Project: $PROJECT_DIR"
 echo ""
 
-# ── Step 7: Write .env ──────────────────────────────────────────
+# ── Step 7: Voice features ───────────────────────────────────────
 
+echo -e "${BOLD}Voice Features (optional)${NC}"
+echo ""
+echo "  Voice lets you send voice messages to the bot (transcribed to text)"
+echo "  and optionally receive responses as audio."
+echo ""
+echo "  Two backends available:"
+echo "    • Free (no API key): faster-whisper (local) + edge-tts (Microsoft)"
+echo "    • Premium (OpenAI):  Whisper API + TTS API (higher quality, costs money)"
+echo ""
+echo "  Voice input/output works out of the box with the free backend."
+echo "  To use OpenAI, add OPENAI_API_KEY to .env after setup."
+echo ""
+
+OPENAI_API_KEY=""
+ask "OpenAI API key (leave blank to use free local backend): "
+read -r OPENAI_API_KEY
+echo ""
+
+if [[ -n "$OPENAI_API_KEY" ]]; then
+    ok "OpenAI backend selected (Whisper + TTS)"
+else
+    ok "Free local backend selected (faster-whisper + edge-tts)"
+    info "Downloading faster-whisper 'base' model on first voice message (~140MB)"
+fi
+echo ""
+
+# ── Step 8: Write .env ──────────────────────────────────────────
+
+OVERWRITE="y"
 if [[ -f "$ENV_FILE" ]]; then
     warn ".env already exists"
     ask "Overwrite? [y/N]: "
-    read -r overwrite
-    if [[ ! "$overwrite" =~ ^[Yy] ]]; then
-        info "Keeping existing .env"
-        echo ""
-    fi
+    read -r OVERWRITE
 fi
 
-if [[ ! -f "$ENV_FILE" || "$overwrite" =~ ^[Yy] ]]; then
+if [[ "$OVERWRITE" =~ ^[Yy] ]]; then
     cat > "$ENV_FILE" <<EOF
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
 ALLOWED_USER_IDS=$USER_IDS
@@ -192,10 +217,32 @@ CLI_TIMEOUT=300
 CLI_TRUST_ALL_TOOLS=true
 LOG_LEVEL=INFO
 EOF
+
+    # Append voice config if OpenAI key provided
+    if [[ -n "$OPENAI_API_KEY" ]]; then
+        cat >> "$ENV_FILE" <<EOF
+
+# Voice features — OpenAI backend
+OPENAI_API_KEY=$OPENAI_API_KEY
+EOF
+    else
+        cat >> "$ENV_FILE" <<EOF
+
+# Voice features — free local backend (faster-whisper + edge-tts)
+# Uncomment and set OPENAI_API_KEY to switch to OpenAI cloud backend:
+# OPENAI_API_KEY=your-key-here
+#
+# Local model size: tiny (75MB, fastest) | base (140MB) | small (460MB, best accuracy)
+WHISPER_LOCAL_MODEL=base
+# TTS voice options: vi-VN-HoaiMyNeural (female) | vi-VN-NamMinhNeural (male)
+TTS_LOCAL_VOICE=vi-VN-HoaiMyNeural
+EOF
+    fi
+
     ok ".env created"
 fi
 
-# ── Step 8: Make chati executable ────────────────────────────────
+# ── Step 9: Make chati executable ────────────────────────────────
 
 chmod +x "$DIR/chati"
 
@@ -216,6 +263,10 @@ esac
 echo ""
 echo "  Then start Chati:"
 echo "    ./chati start"
+echo ""
+echo "  Voice commands (in Telegram):"
+echo "    🎤 Send a voice message → bot transcribes and confirms"
+echo "    /voice                  → toggle voice responses on/off"
 echo ""
 echo "  Other commands:"
 echo "    ./chati stop       # stop"

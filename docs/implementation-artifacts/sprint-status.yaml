@@ -15,7 +15,12 @@
 
 project: Chati v2.0
 last_updated: 2026-05-08
-# 2026-05-08: 5-1-screenshot-detection-forwarding → review
+# 2026-05-08: 6-3-voice-configuration → in-progress
+# 2026-05-08: 6-1-voice-input-whisper → in-progress
+# 2026-05-08: 6-1-voice-input-whisper → review
+# 2026-05-08: 6-2-voice-output-tts → in-progress
+# 2026-05-08: 6-2-voice-output-tts → review
+# 2026-05-08: 6-3-voice-configuration → review
 
 development_status:
   # Epic 0: Test Infrastructure (Foundation)
@@ -50,17 +55,17 @@ development_status:
   3-4-decision-reply-timeout: done
 
   # Epic 4: CLI Information & Session Visibility
-  epic-4: in-progress
+  epic-4: done
   4-1-cli-info-command: done
   4-2-session-list-command: done
-  4-3-enhanced-status-help: review
+  4-3-enhanced-status-help: done
 
   # Epic 5: Screenshot Forwarding (Growth)
-  epic-5: in-progress
-  5-1-screenshot-detection-forwarding: review
+  epic-5: done
+  5-1-screenshot-detection-forwarding: done
 
   # Epic 6: Voice Communication (Growth)
   epic-6: in-progress
-  6-1-voice-input-whisper: ready-for-dev
-  6-2-voice-output-tts: ready-for-dev
-  6-3-voice-configuration: ready-for-dev
+  6-1-voice-input-whisper: done
+  6-2-voice-output-tts: done
+  6-3-voice-configuration: review

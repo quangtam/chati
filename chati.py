@@ -31,7 +31,7 @@ from telegram.ext import (
 from config import Config
 from cli_runner import CliRunner
 from cli_providers import get_available_providers
-from message_utils import format_output, split_message, strip_ansi, extract_final_response, strip_streaming_noise, detect_screenshots
+from message_utils import format_output, split_message, strip_ansi, extract_final_response, strip_streaming_noise, detect_screenshots, is_code_heavy
 from session_manager import DecisionPrompt, PtyState, SessionManager
 import db
 from db import DEFAULT_THREAD_ID, DB_PATH
@@ -57,6 +57,39 @@ _thread_sessions: dict[int | None, int] = {}
 _thread_tasks: dict[int | None, asyncio.Task] = {}
 
 MAX_MSG_LEN = 4096
+
+
+# ── Voice (Story 6.1) ────────────────────────────────────────────
+
+# Module-level voice services — auto-select backend (OpenAI if key present, local otherwise).
+voice_transcriber = None
+voice_synthesizer = None
+if config.voice_enabled:
+    try:
+        from voice import VoiceTranscriber, VoiceSynthesizer
+
+        voice_transcriber = VoiceTranscriber(
+            api_key=config.openai_api_key,
+            model=config.whisper_model,
+            timeout=config.whisper_timeout,
+            local_model=config.whisper_local_model,
+        )
+        voice_synthesizer = VoiceSynthesizer(
+            api_key=config.openai_api_key,
+            model=config.tts_model,
+            voice=config.tts_voice,
+            speed=config.tts_speed,
+            timeout=config.tts_timeout,
+            local_voice=config.tts_local_voice,
+            local_rate=config.tts_local_rate,
+        )
+        backend = "OpenAI" if config.openai_api_key else "local (faster-whisper + edge-tts)"
+        logger.info("Voice enabled — backend: %s", backend)
+    except ImportError as exc:
+        logger.warning(
+            "Voice features disabled: required package not installed (%s)",
+            exc,
+        )
 
 
 # ── Auth Guard ───────────────────────────────────────────────────
@@ -168,10 +201,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/project &lt;path&gt; — Bind thread to project\n"
         "/projects — Browse previous projects\n"
         "/provider &lt;name&gt; — Switch CLI provider\n"
-        "/model — Select AI model\n\n"
+        "/model — Select AI model\n"
+        "/voice — Toggle voice output for this thread\n\n"
 
         "<b>📊 Status:</b>\n"
         "/status — CLI health check\n"
+        "/voice — Toggle voice output (/voice status for config)\n"
         "/skills — List BMAD workflows\n"
         "/help — This message\n\n"
 
@@ -548,6 +583,10 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             max_slots=max_slots,
             cli_path=cli_path,
         )
+        # Append voice state if voice is configured (Story 6.3)
+        if config.voice_enabled:
+            voice_out = await _is_voice_output_enabled(thread_id, context)
+            text += f"\n🎤 Voice output: {'🔊 on' if voice_out else '🔇 off'}"
         await update.message.reply_text(text, parse_mode=ParseMode.HTML)
         return
 
@@ -588,6 +627,10 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cli_path=cli_path,
         pending_decision_remaining=pending_remaining,
     )
+    # Append voice state if voice is configured (Story 6.3)
+    if config.voice_enabled:
+        voice_out = await _is_voice_output_enabled(thread_id, context)
+        text += f"\n🎤 Voice output: {'🔊 on' if voice_out else '🔇 off'}"
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -942,6 +985,347 @@ async def handle_bmad_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _execute_and_reply(update, context, prompt)
 
 
+# ── Voice Toggle Command (Story 6.2 / 6.3) ──────────────────────
+
+
+@authorized
+async def cmd_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /voice — toggle voice output, set speed, or show status.
+
+    Subcommands:
+      /voice           — toggle voice output on/off
+      /voice status    — show current voice config for this thread
+      /voice speed 1.5 — set TTS speed (0.25–4.0)
+      /voice speed reset — clear per-thread speed, revert to global default
+    """
+    if not config.voice_enabled:
+        await update.message.reply_text(
+            "🎤 Voice features not configured.\n"
+            "Set OPENAI_API_KEY in .env to enable voice."
+        )
+        return
+
+    thread_id = _get_thread_id(update)
+    args = context.args  # e.g., ["status"] or ["speed", "1.5"]
+
+    if args and args[0].lower() == "status":
+        await _voice_status(update, context, thread_id)
+        return
+
+    if args and args[0].lower() == "speed":
+        await _voice_set_speed(update, thread_id, args[1:])
+        return
+
+    # Default: toggle voice output
+    thread_key = f"thread:{thread_id}:voice_output"
+
+    # Resolve current state: SQLite → .env → False
+    current = await _resolve_voice_output(thread_id)
+    new_state = not current
+
+    # Persist to SQLite (best-effort — only updates existing rows)
+    try:
+        await db.upsert_voice_output(
+            thread_id if thread_id is not None else DEFAULT_THREAD_ID,
+            voice_output=new_state,
+            path=DB_PATH,
+        )
+    except Exception as exc:
+        logger.warning("[cmd_voice] SQLite persist failed: %s", exc)
+
+    # Update in-memory cache for immediate effect
+    context.bot_data[thread_key] = new_state
+
+    if new_state:
+        await update.message.reply_text(
+            "🔊 Voice output <b>enabled</b> for this thread.\n"
+            "CLI responses will include voice messages (except code-heavy ones).\n"
+            "<i>Setting persisted — survives bot restart.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text(
+            "🔇 Voice output <b>disabled</b> for this thread.\n"
+            "Use /voice again to re-enable.\n"
+            "<i>Setting persisted — survives bot restart.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+async def _voice_set_speed(
+    update: Update, thread_id: int | None, speed_args: list[str]
+) -> None:
+    """Handle /voice speed <value|reset>."""
+    tid = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+
+    if not speed_args:
+        current = await _resolve_tts_speed(thread_id)
+        await update.message.reply_text(
+            f"⚡ Current TTS speed: <b>{current:.2f}x</b>\n\n"
+            "Usage:\n"
+            "  <code>/voice speed 1.5</code> — set speed (0.25–4.0)\n"
+            "  <code>/voice speed reset</code> — revert to global default",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    raw = speed_args[0].lower()
+
+    if raw == "reset":
+        try:
+            await db.upsert_tts_speed(tid, tts_speed=None, path=DB_PATH)
+        except Exception as exc:
+            logger.warning("[cmd_voice speed] SQLite persist failed: %s", exc)
+        await update.message.reply_text(
+            f"⚡ TTS speed reset to global default (<b>{config.tts_speed:.2f}x</b>).\n"
+            "<i>Setting persisted — survives bot restart.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    try:
+        value = float(raw)
+    except ValueError:
+        await update.message.reply_text(
+            f"⚠️ Invalid speed: <code>{_escape_html(raw)}</code>\n"
+            "Provide a number between 0.25 and 4.0, e.g. <code>/voice speed 1.5</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    clamped = max(0.25, min(4.0, value))
+    if clamped != value:
+        await update.message.reply_text(
+            f"⚠️ Speed clamped to valid range: <b>{clamped:.2f}x</b> (was {value})",
+            parse_mode=ParseMode.HTML,
+        )
+
+    try:
+        await db.upsert_tts_speed(tid, tts_speed=clamped, path=DB_PATH)
+    except Exception as exc:
+        logger.warning("[cmd_voice speed] SQLite persist failed: %s", exc)
+
+    await update.message.reply_text(
+        f"⚡ TTS speed set to <b>{clamped:.2f}x</b> for this thread.\n"
+        "<i>Setting persisted — survives bot restart.</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def _voice_status(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, thread_id: int | None
+) -> None:
+    """Show voice configuration status for this thread."""
+    voice_out = await _resolve_voice_output(thread_id)
+    has_override = await _has_thread_voice_override(thread_id)
+    source = "per-thread (SQLite)" if has_override else "global default"
+    tts_speed = await _resolve_tts_speed(thread_id)
+
+    # Check if speed has a per-thread override
+    tid = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+    tc = await db.get_thread_config(tid, path=DB_PATH)
+    speed_source = "per-thread (SQLite)" if (tc and tc.tts_speed is not None) else "global default"
+
+    lines = [
+        "🎤 <b>Voice Configuration</b>\n",
+        f"Voice features: {'✅ enabled' if config.voice_enabled else '❌ disabled'}",
+        f"Whisper model: <code>{_escape_html(config.whisper_model)}</code>",
+        f"TTS model: <code>{_escape_html(config.tts_model)}</code>",
+        f"TTS voice: <code>{_escape_html(config.tts_voice)}</code>",
+        "",
+        "<b>This thread:</b>",
+        f"Voice output: {'🔊 on' if voice_out else '🔇 off'} ({source})",
+        f"TTS speed: <b>{tts_speed:.2f}x</b> ({speed_source})",
+        "",
+        "<i>Use /voice to toggle, /voice speed &lt;value&gt; to set speed, /voice status to see this.</i>",
+    ]
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+    )
+
+# ── Voice Message Handlers (Story 6.1) ──────────────────────────
+
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle voice messages — transcribe via Whisper and show confirmation.
+
+    Auth is enforced inline (rather than via @authorized) because voice
+    messages arrive via a ``filters.VOICE`` handler distinct from the text
+    pipeline, and we want the "voice not configured" branch to still reply
+    even when voice is disabled. See Story 6.1 AC.
+    """
+    user = update.effective_user
+    if not user or user.id not in config.allowed_user_ids:
+        logger.warning(
+            "Unauthorized voice message from user %s",
+            user.id if user else "unknown",
+        )
+        if update.message:
+            await update.message.reply_text(
+                "⛔ Unauthorized. Your user ID is not in the allowed list."
+            )
+        return
+
+    if not config.voice_enabled or voice_transcriber is None:
+        await update.message.reply_text(
+            "🎤 Voice features not configured. Please type your message.\n"
+            "Set OPENAI_API_KEY in .env to enable voice input."
+        )
+        return
+
+    await update.message.reply_chat_action(ChatAction.TYPING)
+
+    # Download the voice file from Telegram to a temp file.
+    voice = update.message.voice
+    voice_file = await context.bot.get_file(voice.file_id)
+
+    # Telegram voice messages are OGG Opus; Whisper accepts OGG natively.
+    import tempfile as _tempfile
+    with _tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        try:
+            await voice_file.download_to_drive(tmp_path)
+        except Exception as exc:
+            logger.warning("[voice] download failed: %s", exc)
+            await update.message.reply_text(
+                "⚠️ Voice transcription temporarily unavailable. Please type your message."
+            )
+            return
+
+        try:
+            text = await voice_transcriber.transcribe(tmp_path)
+        except Exception as exc:
+            # Defensive — VoiceTranscriber.transcribe() already catches,
+            # but we never let a handler raise up to python-telegram-bot.
+            logger.exception("[voice] unexpected transcribe error: %s", exc)
+            text = None
+
+        if not text:
+            await update.message.reply_text(
+                "⚠️ Voice transcription temporarily unavailable. Please type your message."
+            )
+            return
+
+        # Remember this thread's pending transcription for the callback.
+        thread_id = _get_thread_id(update)
+        context.bot_data[f"thread:{thread_id}:voice_transcription"] = text
+
+        # Auto-send mode: skip confirm keyboard, forward immediately.
+        if config.voice_auto_send:
+            await update.message.reply_text(
+                f"🎤 <i>{_escape_html(text)}</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            await _execute_and_reply(update, context, text)
+            return
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Send", callback_data=f"voice:send:{thread_id}"),
+            InlineKeyboardButton("✏️ Edit", callback_data=f"voice:edit:{thread_id}"),
+            InlineKeyboardButton("🗑️ Cancel", callback_data=f"voice:cancel:{thread_id}"),
+        ]])
+
+        await update.message.reply_text(
+            f"🎤 <b>Transcription:</b>\n\n<i>{_escape_html(text)}</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+async def handle_voice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle voice transcription confirmation callbacks (send/edit/cancel)."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+
+    # Auth check — callback handler is registered separately from messages.
+    user = query.from_user
+    if not user or user.id not in config.allowed_user_ids:
+        logger.warning(
+            "Unauthorized voice callback from user %s",
+            user.id if user else "unknown",
+        )
+        return
+
+    # callback_data format: "voice:<action>:<thread_id>"
+    parts = (query.data or "").split(":")
+    if len(parts) != 3:
+        return
+    _, action, thread_id_str = parts
+    try:
+        thread_id: int | None = int(thread_id_str) if thread_id_str != "None" else None
+    except ValueError:
+        return
+
+    transcription_key = f"thread:{thread_id}:voice_transcription"
+    text = context.bot_data.get(transcription_key, "")
+
+    if action == "send":
+        # Guard: transcription may be lost if bot restarted between voice
+        # message and button tap (bot_data is in-memory only).
+        if not text:
+            try:
+                await query.edit_message_text(
+                    "⚠️ Transcription expired. Please send a new voice message."
+                )
+            except Exception:
+                pass
+            return
+
+        context.bot_data.pop(transcription_key, None)
+        try:
+            await query.edit_message_text(
+                f"🎤 ✅ <i>{_escape_html(text)}</i>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            # Non-fatal — forwarding matters more than rendering.
+            pass
+        # Forward to CLI as if the user had typed it.
+        # Callback queries have update.message=None; build a lightweight
+        # proxy so _execute_and_reply can call reply_text/reply_chat_action
+        # on the original message that carried the inline keyboard.
+        class _UpdateProxy:
+            """Thin proxy that redirects .message to query.message."""
+            def __init__(self, real_update, msg):
+                object.__setattr__(self, '_real', real_update)
+                object.__setattr__(self, 'message', msg)
+            def __getattr__(self, name):
+                return getattr(object.__getattribute__(self, '_real'), name)
+
+        proxy = _UpdateProxy(update, query.message)
+        await _execute_and_reply(proxy, context, text)
+
+    elif action == "edit":
+        # Next text message in this thread replaces the transcription.
+        context.bot_data[f"thread:{thread_id}:voice_edit_mode"] = True
+        try:
+            await query.edit_message_text(
+                f"🎤 ✏️ Original: <i>{_escape_html(text)}</i>\n\n"
+                "Type your corrected message:",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+    elif action == "cancel":
+        context.bot_data.pop(transcription_key, None)
+        try:
+            await query.edit_message_text("🎤 🗑️ Voice message cancelled.")
+        except Exception:
+            pass
+
+
 # ── Free-form Message Handler ────────────────────────────────────
 
 @authorized
@@ -952,6 +1336,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     thread_id = _get_thread_id(update)
+
+    # Voice edit mode — user is typing a corrected transcription (Story 6.1)
+    edit_key = f"thread:{thread_id}:voice_edit_mode"
+    if context.bot_data.get(edit_key):
+        context.bot_data.pop(edit_key, None)
+        context.bot_data.pop(f"thread:{thread_id}:voice_transcription", None)
+        await _execute_and_reply(update, context, text.strip())
+        return
+
     pending_key = f"thread:{thread_id}:pending_decision"
 
     # If a decision is pending, treat this message as the reply
@@ -1182,7 +1575,10 @@ async def _stream_to_telegram(
         await _send_html_with_fallback(update, chunk)
 
     # Screenshot forwarding (Story 5.1 / FR32) — post-processing after text.
-    screenshot_paths = detect_screenshots(raw_output)
+    # Scope detection to the final response only (not tool invocation logs) to
+    # avoid forwarding paths that the CLI merely *mentioned* vs actually created.
+    screenshot_scan_text = extract_final_response(raw_output) or raw_output
+    screenshot_paths = detect_screenshots(screenshot_scan_text)
     if screenshot_paths:
         try:
             resolved = await db.resolve_thread_config(
@@ -1196,6 +1592,22 @@ async def _stream_to_telegram(
         except Exception:
             project_dir = config.project_dir
         await _send_screenshots(update, screenshot_paths, project_dir=project_dir)
+
+    # Voice output (Story 6.2 / FR35) — additive, text always sent first.
+    if voice_synthesizer and await _is_voice_output_enabled(thread_id, context):
+        raw_for_code_check = raw_output
+        if not is_code_heavy(raw_for_code_check):
+            plain_text = _strip_html_for_tts(final)
+            if plain_text and len(plain_text) > 10:
+                tts_speed = await _resolve_tts_speed(thread_id)
+                audio_bytes = await voice_synthesizer.synthesize(plain_text, speed=tts_speed)
+                if audio_bytes:
+                    await _send_voice_message(update, audio_bytes)
+                else:
+                    try:
+                        await update.message.reply_text("🔇 Voice temporarily unavailable")
+                    except Exception:
+                        pass
 
 
 async def _execute_and_reply_inner(
@@ -1347,6 +1759,7 @@ async def _execute_and_reply_inner(
 
     # Format and send final result
     full_output = "".join(raw_lines)
+    logger.debug("[raw_output] %r", full_output[:500])
     is_error = runner.get_exit_code(thread_id) != 0
     output = format_output(full_output, is_error)
     chunks = split_message(output)
@@ -1363,16 +1776,120 @@ async def _execute_and_reply_inner(
         await _send_html_with_fallback(update, chunk)
 
     # Screenshot forwarding (Story 5.1 / FR32) — post-processing after text.
-    screenshot_paths = detect_screenshots(full_output)
+    # Scope detection to the final response only (not tool invocation logs) to
+    # avoid forwarding paths that the CLI merely *mentioned* vs actually created.
+    screenshot_scan_text = extract_final_response(full_output) or full_output
+    screenshot_paths = detect_screenshots(screenshot_scan_text)
     if screenshot_paths:
         await _send_screenshots(
             update, screenshot_paths, project_dir=resolved_project_dir
         )
 
+    # Voice output (Story 6.2 / FR35) — additive, text always sent first.
+    if voice_synthesizer and await _is_voice_output_enabled(thread_id, context):
+        raw_for_code_check = extract_final_response(full_output) or full_output
+        if not is_code_heavy(raw_for_code_check):
+            plain_text = _strip_html_for_tts(output)
+            if plain_text and len(plain_text) > 10:
+                tts_speed = await _resolve_tts_speed(thread_id)
+                audio_bytes = await voice_synthesizer.synthesize(plain_text, speed=tts_speed)
+                if audio_bytes:
+                    await _send_voice_message(update, audio_bytes)
+                else:
+                    try:
+                        await update.message.reply_text("🔇 Voice temporarily unavailable")
+                    except Exception:
+                        pass
+
 
 def _escape_html(text: str) -> str:
     """Escape HTML special characters."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _strip_html_for_tts(html_text: str) -> str:
+    """Strip HTML tags and entities for plain-text TTS input."""
+    # Remove HTML tags
+    text = re.sub(r"<[^>]+>", "", html_text)
+    # Decode common HTML entities
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+async def _is_voice_output_enabled(
+    thread_id: int | None, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Check if voice output is enabled for this thread (async, Story 6.3).
+
+    Resolution order:
+      1. In-memory cache (context.bot_data) — fast path
+      2. SQLite per-thread override — populated on cache miss
+      3. Global config default (config.voice_output_enabled)
+    """
+    thread_key = f"thread:{thread_id}:voice_output"
+
+    # Fast path: in-memory cache
+    cached = context.bot_data.get(thread_key)
+    if cached is not None:
+        return cached
+
+    # Cache miss — resolve from SQLite
+    resolved = await _resolve_voice_output(thread_id)
+    context.bot_data[thread_key] = resolved
+    return resolved
+
+
+async def _resolve_voice_output(thread_id: int | None) -> bool:
+    """Resolve voice output setting: SQLite → .env → False."""
+    tid = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+    tc = await db.get_thread_config(tid, path=DB_PATH)
+    if tc is not None and tc.voice_output is not None:
+        return bool(tc.voice_output)
+    return config.voice_output_enabled
+
+
+async def _resolve_tts_speed(thread_id: int | None) -> float:
+    """Resolve TTS speed: SQLite per-thread → .env global → 1.5."""
+    tid = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+    tc = await db.get_thread_config(tid, path=DB_PATH)
+    if tc is not None and tc.tts_speed is not None:
+        return float(tc.tts_speed)
+    return config.tts_speed
+
+
+async def _has_thread_voice_override(thread_id: int | None) -> bool:
+    """Check if this thread has an explicit voice_output override in SQLite."""
+    tid = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+    tc = await db.get_thread_config(tid, path=DB_PATH)
+    return tc is not None and tc.voice_output is not None
+
+
+async def _send_voice_message(update: Update, audio_bytes: bytes) -> None:
+    """Send audio bytes as a Telegram voice message.
+
+    Supports OGG Opus (from OpenAI TTS) and MP3 (from edge-tts).
+    Telegram's sendVoice accepts both formats.
+    """
+    import io as _io
+    from telegram import InputFile as _InputFile
+
+    # Detect format from magic bytes to set correct filename/MIME
+    # MP3: starts with 0xFF 0xFB, 0xFF 0xF3, 0xFF 0xF2, or ID3 tag
+    # OGG: starts with "OggS"
+    if audio_bytes[:4] == b"OggS":
+        filename = "response.ogg"
+    elif audio_bytes[:3] == b"ID3" or (len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and audio_bytes[1] in (0xFB, 0xF3, 0xF2, 0xFA)):
+        filename = "response.mp3"
+    else:
+        filename = "response.ogg"  # default — let Telegram figure it out
+
+    try:
+        voice_file = _InputFile(_io.BytesIO(audio_bytes), filename=filename)
+        await update.message.reply_voice(voice=voice_file)
+    except Exception as exc:
+        logger.warning("[voice] failed to send voice message: %s", exc)
 
 
 async def _send_html_with_fallback(update: Update, text: str) -> None:
@@ -1404,6 +1921,9 @@ async def _send_screenshots(
 
     Graceful degradation: missing files, oversize images, or API errors are
     logged and skipped — they never raise to the caller.
+
+    A 0.5s delay is inserted between sends to respect Telegram's per-chat
+    rate limit (30 messages/min).
 
     Args:
         update: Telegram Update (used for reply context).
@@ -1458,6 +1978,10 @@ async def _send_screenshots(
                         caption=f"📎 {filename} ({size_mb:.1f}MB)",
                     )
             sent += 1
+            # Rate-limit guard: Telegram allows ~30 messages/min/chat.
+            # Pause briefly between sends when there are more to come.
+            if sent < len(screenshot_paths):
+                await asyncio.sleep(0.5)
         except Exception as exc:
             # Telegram API errors, file I/O races, etc. — log and skip.
             logger.warning(
@@ -1515,12 +2039,19 @@ def main() -> None:
     app.add_handler(CommandHandler("provider", cmd_provider))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("sessions", cmd_sessions))
+    app.add_handler(CommandHandler("voice", cmd_voice))
 
     # Model selection callback
     app.add_handler(CallbackQueryHandler(handle_model_callback, pattern=r"^model:"))
 
     # Project selection callback (/projects)
     app.add_handler(CallbackQueryHandler(handle_projects_callback, pattern=r"^project:"))
+
+    # Voice confirmation callback (Story 6.1)
+    app.add_handler(CallbackQueryHandler(handle_voice_callback, pattern=r"^voice:"))
+
+    # Voice message handler (Story 6.1)
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
 
     # BMAD slash commands
     app.add_handler(MessageHandler(

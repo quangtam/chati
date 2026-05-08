@@ -1,6 +1,6 @@
 # Story 6.3: Voice Configuration & Code Detection
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -29,14 +29,14 @@ So that voice doesn't fire inappropriately and users have control.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1: Persist `/voice` toggle to SQLite (survive bot restarts)
-- [ ] Task 2: Add `voice_output` column migration to `db.py` with backward-compatible schema evolution
-- [ ] Task 3: Extend `resolve_thread_config()` to include `voice_output` in resolution chain
-- [ ] Task 4: Harden `is_code_heavy()` with edge cases (inline code, nested blocks, empty blocks)
-- [ ] Task 5: Add `/voice status` subcommand showing current voice config for the thread
-- [ ] Task 6: Ensure graceful no-op when `openai` package is not installed
-- [ ] Task 7: Update `/help` and `/info` to reflect voice feature state
-- [ ] Task 8: Write tests in `tests/test_voice_configuration.py`
+- [x] Task 1: Persist `/voice` toggle to SQLite (survive bot restarts)
+- [x] Task 2: Add `voice_output` column migration to `db.py` with backward-compatible schema evolution
+- [x] Task 3: Extend `resolve_thread_config()` to include `voice_output` in resolution chain
+- [x] Task 4: Harden `is_code_heavy()` with edge cases (inline code, nested blocks, empty blocks)
+- [x] Task 5: Add `/voice status` subcommand showing current voice config for the thread
+- [x] Task 6: Ensure graceful no-op when `openai` package is not installed
+- [x] Task 7: Update `/help` and `/info` to reflect voice feature state
+- [x] Task 8: Write tests in `tests/test_voice_configuration.py`
 
 ## Dev Notes
 
@@ -599,3 +599,39 @@ Test cases for schema migration:
 ---
 
 *Ultimate context engine analysis completed — comprehensive developer guide created*
+
+---
+
+## Dev Agent Record
+
+### Implementation Plan
+
+- Tasks 1–3 were partially pre-implemented in prior sessions (db.py had `voice_output` column, `upsert_voice_output`, and `ThreadConfig.voice_output`). This session completed the remaining work.
+- Task 1: Updated `cmd_voice` in `chati.py` to call `db.upsert_voice_output()` on toggle, persisting state to SQLite. Also updated in-memory cache for immediate effect.
+- Task 3: Extended `ResolvedConfig` dataclass with `voice_output: bool` field and updated `resolve_thread_config()` to accept `env_voice_output` parameter and resolve from SQLite → env → False.
+- Task 4: `is_code_heavy()` was already hardened in `message_utils.py` (content-only ratio, inline code excluded, language specifiers handled).
+- Task 5: Added `_voice_status()` helper and `/voice status` subcommand to `cmd_voice`. Shows whisper model, TTS model, TTS voice, and per-thread override source.
+- Task 6: Graceful import handling was already in place in `chati.py` (try/except ImportError around voice module import).
+- Task 7: `/help` already listed `/voice`. `/info` already appended voice state. Both updated to use `await _is_voice_output_enabled()` (now async).
+- Task 8: Converted `_is_voice_output_enabled` to async with SQLite fallback. Added `_resolve_voice_output()` and `_has_thread_voice_override()` helpers. Updated all call sites to `await`. Unskipped all 8 previously-skipped tests and added 7 new tests (persistence, resolve chain, toggle persistence). Fixed 2 regressions in `test_voice_output.py` (sync → async call sites).
+
+### Completion Notes
+
+- All 8 tasks complete. 339 tests pass, 0 failures.
+- `_is_voice_output_enabled` is now async — resolves from in-memory cache first, then SQLite, then global config.
+- `/voice` toggle persists to SQLite and updates in-memory cache atomically.
+- `/voice status` shows full voice config including per-thread override source.
+- `ResolvedConfig.voice_output` field added to 3-layer resolution chain.
+- All previously-skipped tests in `test_voice_configuration.py` now pass (33 total).
+- Epic 6 is complete — all voice features (input, output, configuration) are production-ready.
+
+## File List
+
+- `chati.py` — Updated: `_is_voice_output_enabled` made async with SQLite fallback; added `_resolve_voice_output()` and `_has_thread_voice_override()` helpers; `cmd_voice` persists to SQLite and adds `/voice status` subcommand; `_voice_status()` helper added; all call sites updated to `await`
+- `db.py` — Updated: `ResolvedConfig` dataclass gains `voice_output: bool` field; `resolve_thread_config()` gains `env_voice_output` parameter and resolves voice_output in 3-layer chain
+- `tests/test_voice_configuration.py` — Updated: removed all `@pytest.mark.skip` decorators; added 7 new tests for persistence, resolve chain, and toggle; 33 tests total
+- `tests/test_voice_output.py` — Updated: fixed 2 tests calling `_is_voice_output_enabled` without `await`
+
+## Change Log
+
+- 2026-05-08: Story 6.3 implemented — voice configuration hardening complete. Persisted /voice toggle to SQLite, added /voice status subcommand, made _is_voice_output_enabled async with SQLite fallback, extended ResolvedConfig with voice_output field, unskipped and expanded test suite (33 tests). Epic 6 complete.

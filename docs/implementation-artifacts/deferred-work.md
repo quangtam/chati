@@ -34,3 +34,18 @@ All items in this batch were swept during the tech-debt cleanup on the same day:
 ## Currently Open (to revisit)
 
 - **`cmd_cancel` real-PTY integration test** — only item still deferred as of 2026-05-07. Tracked above.
+
+## Deferred from: code review of 5-1-screenshot-detection-forwarding (2026-05-08)
+
+- **Caption HTML escaping** — `f"📸 {filename}"` and `f"📎 {filename} ({size_mb:.1f}MB)"` captions in `_send_screenshots` are not HTML-escaped. Benign today because no `parse_mode` is set on `reply_photo`/`reply_document`. Would become a bug if parse_mode is ever added. Fix: wrap filename with `_escape_html()`. [chati.py:1451,1457]
+- **Extra DB call in `_stream_to_telegram`** — calls `db.resolve_thread_config()` just to get `project_dir` for screenshot path resolution. Could use `db.get_thread_config()` directly (lighter) or pass `project_dir` as a parameter to `_stream_to_telegram`. Minor perf nit, not a correctness issue. [chati.py:1188-1197]
+
+## Deferred from: code review of 6-1-voice-input-whisper (2026-05-08)
+
+- **Edit mode flag persistence** — `voice_edit_mode` in `bot_data` has no TTL. If user taps ✏️ but never types a replacement, the flag persists indefinitely. Next text message in that thread (even days later) gets intercepted as the "edit". Acceptable for v1 single-user bot; consider clearing on next voice message or adding a timeout in story 6.3. [chati.py:handle_message voice_edit_mode branch]
+
+## Deferred from: code review of 6-2-voice-output-tts (2026-05-08)
+
+- **Inline imports in `_send_voice_message`** — `io` and `InputFile` imported inside the function body; `InputFile` is already at module level. Minor style inconsistency. [chati.py:_send_voice_message]
+- **`is_code_heavy` counts ``` delimiters** — code block ratio includes the opening/closing ``` fences, slightly inflating the code ratio. Story 6.3 spec explicitly plans to refine this to count only content inside blocks. [message_utils.py:is_code_heavy]
+- **Separate OpenAI clients for Transcriber and Synthesizer** — `VoiceTranscriber` and `VoiceSynthesizer` each create their own `AsyncOpenAI` client. A shared client would reduce connection overhead. Story 6.3 spec mentions this optimization. [voice.py]

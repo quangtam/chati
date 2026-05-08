@@ -69,7 +69,8 @@ class TestStripStreamingNoise:
             "    pass\n"
         )
         out = strip_streaming_noise(text)
-        assert "Reading file: src/app.py" in out
+        # Tool invocation lines are now stripped from streaming preview
+        assert "Reading file: src/app.py" not in out
         assert "Let me think about this carefully..." in out
         assert "Here's the result:" in out
         assert "def foo():" in out
@@ -87,8 +88,8 @@ class TestStripStreamingNoise:
         out = strip_streaming_noise(text)
         # Spinner lines gone
         assert "Thinking" not in out
-        # Real content kept
-        assert "Reading file: foo.py" in out
+        # Tool invocation lines stripped from streaming preview
+        assert "Reading file: foo.py" not in out
         assert "Here is the code:" in out
         # Bare ellipsis line gone
         assert "\n...\n" not in out

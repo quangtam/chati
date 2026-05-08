@@ -236,3 +236,46 @@ class TestSendScreenshots:
 
         assert count == 3
         assert mock_update.message.reply_photo.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_isfile_oserror_skipped(self, mock_update):
+        """OSError from os.path.isfile is caught and path is skipped."""
+        from chati import _send_screenshots
+
+        with patch("os.path.isfile", side_effect=OSError("permission denied")):
+            count = await _send_screenshots(mock_update, ["/some/path.png"])
+
+        assert count == 0
+        mock_update.message.reply_photo.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_getsize_oserror_skipped(self, mock_update, tmp_path):
+        """OSError from os.path.getsize is caught and path is skipped."""
+        img_path = tmp_path / "shot.png"
+        img_path.write_bytes(b"\x89PNG" + b"x" * 50)
+
+        from chati import _send_screenshots
+
+        with patch("os.path.getsize", side_effect=OSError("permission denied")):
+            count = await _send_screenshots(mock_update, [str(img_path)])
+
+        assert count == 0
+        mock_update.message.reply_photo.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reply_document_api_failure_graceful(self, mock_update, tmp_path):
+        """reply_document raising an exception is caught and path is skipped."""
+        big_path = tmp_path / "big.png"
+        big_path.write_bytes(b"x" * (11 * 1024 * 1024))  # 11MB
+
+        mock_update.message.reply_document = AsyncMock(
+            side_effect=Exception("Telegram API error")
+        )
+
+        from chati import _send_screenshots
+
+        count = await _send_screenshots(mock_update, [str(big_path)])
+
+        assert count == 0
+        mock_update.message.reply_document.assert_called_once()
+        mock_update.message.reply_photo.assert_not_called()
