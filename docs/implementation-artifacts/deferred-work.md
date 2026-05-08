@@ -49,3 +49,12 @@ All items in this batch were swept during the tech-debt cleanup on the same day:
 - **Inline imports in `_send_voice_message`** — `io` and `InputFile` imported inside the function body; `InputFile` is already at module level. Minor style inconsistency. [chati.py:_send_voice_message]
 - **`is_code_heavy` counts ``` delimiters** — code block ratio includes the opening/closing ``` fences, slightly inflating the code ratio. Story 6.3 spec explicitly plans to refine this to count only content inside blocks. [message_utils.py:is_code_heavy]
 - **Separate OpenAI clients for Transcriber and Synthesizer** — `VoiceTranscriber` and `VoiceSynthesizer` each create their own `AsyncOpenAI` client. A shared client would reduce connection overhead. Story 6.3 spec mentions this optimization. [voice.py]
+
+
+## Deferred from: code review of 6-3-voice-configuration (2026-05-08)
+
+- `TTS_SPEED` env var crash on invalid input — `float(os.getenv(...))` with no try/except; pre-existing pattern across all env vars in config.py
+- Voice edit mode flag (`voice_edit_mode` in bot_data) persists indefinitely with no timeout/cleanup — pre-existing from Story 6.1
+- `_UpdateProxy` class fragility in group chat scenarios — proxy may not correctly forward all attributes; pre-existing from Story 6.1
+- Non-atomic read-toggle-write race on rapid `/voice` double-tap — acceptable for single-user bot deployment
+- Triple DB query in `_voice_status` for same thread_id — could be optimized to single `get_thread_config` call; acceptable for low-frequency command handler

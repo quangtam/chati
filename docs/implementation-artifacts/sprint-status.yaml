@@ -65,7 +65,7 @@ development_status:
   5-1-screenshot-detection-forwarding: done
 
   # Epic 6: Voice Communication (Growth)
-  epic-6: in-progress
+  epic-6: done
   6-1-voice-input-whisper: done
   6-2-voice-output-tts: done
-  6-3-voice-configuration: review
+  6-3-voice-configuration: done

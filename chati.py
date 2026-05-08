@@ -1096,30 +1096,39 @@ async def cmd_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     new_state = not current
 
     # Persist to SQLite (best-effort — only updates existing rows)
+    persisted = False
     try:
-        await db.upsert_voice_output(
-            thread_id if thread_id is not None else DEFAULT_THREAD_ID,
-            voice_output=new_state,
-            path=DB_PATH,
-        )
+        tid = thread_id if thread_id is not None else DEFAULT_THREAD_ID
+        tc = await db.get_thread_config(tid, path=DB_PATH)
+        if tc is not None:
+            await db.upsert_voice_output(tid, voice_output=new_state, path=DB_PATH)
+            persisted = True
+        else:
+            logger.debug("[cmd_voice] thread %s has no row — session-only toggle", tid)
     except Exception as exc:
         logger.warning("[cmd_voice] SQLite persist failed: %s", exc)
 
     # Update in-memory cache for immediate effect
     context.bot_data[thread_key] = new_state
 
+    persist_note = (
+        "<i>Setting persisted — survives bot restart.</i>"
+        if persisted
+        else "<i>Session-only — use /project first to persist across restarts.</i>"
+    )
+
     if new_state:
         await update.message.reply_text(
             "🔊 Voice output <b>enabled</b> for this thread.\n"
-            "CLI responses will include voice messages (except code-heavy ones).\n"
-            "<i>Setting persisted — survives bot restart.</i>",
+            f"CLI responses will include voice messages (except code-heavy ones).\n"
+            f"{persist_note}",
             parse_mode=ParseMode.HTML,
         )
     else:
         await update.message.reply_text(
             "🔇 Voice output <b>disabled</b> for this thread.\n"
-            "Use /voice again to re-enable.\n"
-            "<i>Setting persisted — survives bot restart.</i>",
+            f"Use /voice again to re-enable.\n"
+            f"{persist_note}",
             parse_mode=ParseMode.HTML,
         )
 
@@ -1166,20 +1175,27 @@ async def _voice_set_speed(
         return
 
     clamped = max(0.25, min(4.0, value))
-    if clamped != value:
-        await update.message.reply_text(
-            f"⚠️ Speed clamped to valid range: <b>{clamped:.2f}x</b> (was {value})",
-            parse_mode=ParseMode.HTML,
-        )
+    clamp_note = f" (clamped from {value})" if clamped != value else ""
 
-    try:
-        await db.upsert_tts_speed(tid, tts_speed=clamped, path=DB_PATH)
-    except Exception as exc:
-        logger.warning("[cmd_voice speed] SQLite persist failed: %s", exc)
+    # Check if thread has a row for persistence
+    tc = await db.get_thread_config(tid, path=DB_PATH)
+    persisted = False
+    if tc is not None:
+        try:
+            await db.upsert_tts_speed(tid, tts_speed=clamped, path=DB_PATH)
+            persisted = True
+        except Exception as exc:
+            logger.warning("[cmd_voice speed] SQLite persist failed: %s", exc)
+
+    persist_note = (
+        "<i>Setting persisted — survives bot restart.</i>"
+        if persisted
+        else "<i>Session-only — use /project first to persist across restarts.</i>"
+    )
 
     await update.message.reply_text(
-        f"⚡ TTS speed set to <b>{clamped:.2f}x</b> for this thread.\n"
-        "<i>Setting persisted — survives bot restart.</i>",
+        f"⚡ TTS speed set to <b>{clamped:.2f}x</b>{clamp_note} for this thread.\n"
+        f"{persist_note}",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1667,7 +1683,7 @@ async def _stream_to_telegram(
 
     # Voice output (Story 6.2 / FR35) — additive, text always sent first.
     if voice_synthesizer and await _is_voice_output_enabled(thread_id, context):
-        raw_for_code_check = raw_output
+        raw_for_code_check = extract_final_response(raw_output) or raw_output
         if not is_code_heavy(raw_for_code_check):
             plain_text = _strip_html_for_tts(final)
             if plain_text and len(plain_text) > 10:
@@ -1881,10 +1897,11 @@ def _escape_html(text: str) -> str:
 
 def _strip_html_for_tts(html_text: str) -> str:
     """Strip HTML tags and entities for plain-text TTS input."""
+    import html as _html_mod
     # Remove HTML tags
     text = re.sub(r"<[^>]+>", "", html_text)
-    # Decode common HTML entities
-    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    # Decode all HTML entities (handles &lt; &gt; &amp; &quot; &#39; etc.)
+    text = _html_mod.unescape(text)
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text

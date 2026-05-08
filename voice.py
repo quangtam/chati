@@ -217,7 +217,7 @@ class VoiceSynthesizer:
         if self._use_openai:
             return await self._synthesize_openai(text, speed=effective_speed)
         else:
-            return await self._synthesize_edge(text)
+            return await self._synthesize_edge(text, speed=effective_speed)
 
     async def _synthesize_openai(self, text: str, *, speed: float | None = None) -> bytes | None:
         """Synthesize via OpenAI TTS API."""
@@ -245,21 +245,33 @@ class VoiceSynthesizer:
             logger.error("[voice] OpenAI TTS failed: %s", exc)
             return None
 
-    async def _synthesize_edge(self, text: str) -> bytes | None:
+    async def _synthesize_edge(self, text: str, *, speed: float | None = None) -> bytes | None:
         """Synthesize via edge-tts (Microsoft Edge TTS, free, no API key).
 
         edge-tts outputs MP3 by default. Telegram's sendVoice accepts OGG Opus
         but also accepts MP3 — we send MP3 directly to avoid needing ffmpeg.
+
+        Args:
+            text: Text to synthesize.
+            speed: Optional speed override (0.25–4.0). Converted to edge-tts
+                   rate format (e.g., 1.5 → "+50%", 0.8 → "-20%").
         """
         try:
             import edge_tts
+
+            # Convert speed float to edge-tts rate string (percentage offset from 1.0)
+            if speed is not None:
+                pct = int((speed - 1.0) * 100)
+                rate = f"{pct:+d}%" if pct != 0 else "+0%"
+            else:
+                rate = self._local_rate
 
             # edge-tts writes to a file; use a temp file then read bytes back.
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
                 tmp_path = tmp.name
 
             try:
-                communicate = edge_tts.Communicate(text, self._local_voice, rate=self._local_rate)
+                communicate = edge_tts.Communicate(text, self._local_voice, rate=rate)
                 await asyncio.wait_for(
                     communicate.save(tmp_path),
                     timeout=self._timeout,

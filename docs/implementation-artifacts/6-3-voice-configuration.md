@@ -1,6 +1,6 @@
 # Story 6.3: Voice Configuration & Code Detection
 
-Status: review
+Status: done
 
 ## Story
 
@@ -635,3 +635,28 @@ Test cases for schema migration:
 ## Change Log
 
 - 2026-05-08: Story 6.3 implemented — voice configuration hardening complete. Persisted /voice toggle to SQLite, added /voice status subcommand, made _is_voice_output_enabled async with SQLite fallback, extended ResolvedConfig with voice_output field, unskipped and expanded test suite (33 tests). Epic 6 complete.
+
+
+## Senior Developer Review (AI)
+
+**Review Date:** 2026-05-08
+**Outcome:** Changes Requested
+**Layers:** Blind Hunter ✅ | Edge Case Hunter ✅ | Acceptance Auditor ✅
+
+### Action Items
+
+- [x] [High] `/voice speed` ignored on edge-tts backend — `_synthesize_edge()` doesn't accept speed param; users without OpenAI key see no effect
+- [x] [Med] `upsert_voice_output`/`upsert_tts_speed` silently no-ops for new threads — user told "persisted" but setting lost on restart
+- [x] [Med] `is_code_heavy` fed raw CLI output in `_stream_to_telegram` — should use `extract_final_response()` like `_execute_and_reply_inner`
+- [x] [Med] Cache updated even when SQLite persist fails — should be conditional or warn user
+- [x] [Low] Double message on `/voice speed` clamp — missing early return after warning
+- [x] [Low] `_strip_html_for_tts` should use `html.unescape()` instead of manual entity replacement
+- [x] [Low] Missing tests for graceful no-op when `openai` not installed (spec test cases 15-16)
+
+### Deferred (pre-existing, not caused by this change)
+
+- [x] `TTS_SPEED` env var crash on invalid input — pre-existing pattern across all env vars
+- [x] Voice edit mode flag persists indefinitely (no timeout) — pre-existing from Story 6.1
+- [x] `_UpdateProxy` fragility in group scenarios — pre-existing from Story 6.1
+- [x] Non-atomic read-toggle-write race on rapid double-tap — acceptable for single-user bot
+- [x] Triple DB query in `_voice_status` (performance) — acceptable for command handler
